@@ -53,6 +53,14 @@ tests/      核心规则单元测试
 **core 负责生物学与判定，ui 只负责把状态画出来。** 没有外部图片/字体/音频，
 所有生物、字母和音效都是程序化生成的。规则细节见 `docs/SPEC.md`。
 
+## 自动部署 / Deploy
+
+推送到 `main` 即由 GitHub Actions 构建、跑单测、再把 `dist/` 同步到阿里云：
+
+- 线上试玩：**https://8-138-133-118.sslip.io:8444/frameshift/**
+- 流水线：`.github/workflows/deploy.yml`（构建 → `npm test` → rsync → 冒烟测试）
+- 服务器：静态目录 `/var/www/frameshift/`，nginx 挂在 `/frameshift/` 子路径，由独立的 `deploy` 用户用密钥写入
+
 ## 参赛 / Game Off
 
 本作是 **GitHub Game Off 2026** 的参赛作品，主题为 **SHIFT**。
