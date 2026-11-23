@@ -37,11 +37,23 @@ interface PartDef {
   stats: Partial<Stats>;      // 增量，不是绝对值
   tags: string[];             // 'light' | 'jump' | 'armor' | 'fly' | 'poison' ...
   ability?: AbilityId;        // 战斗主动技
-  art: ArtRef;                // 渲染 key + 锚点偏移，不含资源路径
+  art: PartArt;               // 3D 挂载信息，见下方
   unlock: { level?: number; cost?: number };  // 解锁条件
 }
 type SlotId = 'body' | 'beak' | 'legs' | 'wings' | 'tail' | 'crest';
 interface Stats { hp: number; atk: number; def: number; spd: number; }
+
+/** 伪 3D：零件不存贴图路径，只存"几何 key + 挂点变换"，模型由代码生成 */
+interface PartArt {
+  geometry: string;           // 'leg.spring' → 程序化几何生成器
+  material: 'skin' | 'metal' | 'feather' | 'bone';
+  anchor: SlotId;             // 挂到骨架的哪个节点
+  offset: [number, number, number];   // 相对锚点的位移（模型单位 = 1 分米）
+  rotation: [number, number, number]; // 欧拉角，度
+  scale: number;
+  /** 左右镜像（腿/翼成对时用） */
+  mirrored?: boolean;
+}
 ```
 
 ### 1.2 `synergies.json`（组合规则）
@@ -210,19 +222,25 @@ type EditErrorCode =
 
 ```ts
 interface CreatureView {
-  setCreature(c: Creature, s: CreatureStats): void;   // 换装/换阶段
-  playEdit(prev: Creature, next: Creature): void;     // 装配动画（部件飞入、弹出）
-  update(t: number): void;                            // 待机呼吸、眨眼
+  setCreature(c: Creature, s: CreatureStats): void;   // 换装/换阶段（重建 3D 挂点）
+  playEdit(prev: Creature, next: Creature): void;     // 装配动画（零件从侧栏飞入、旋转落位）
+  highlightSlot(slot: SlotId | null): void;           // 侧栏 hover → 3D 高亮对应槽位
+  update(t: number): void;                            // 呼吸、眨眼、扇翼（程序化变换）
 }
 
 interface BattleView {
   load(cfg: BattleConfig, stats: { left: CreatureStats; right: CreatureStats }): void;
   play(events: BattleEvent[], speed?: 1 | 2): Promise<void>;
   setPaused(p: boolean): void;
+  /** 相机是固定的；只允许轻微震动/推近，不做自由旋转 */
+  shake(intensity: number): void;
 }
 ```
 
-Web 用 Canvas 2D 实现；小游戏端换成原生 Canvas 实现；若未来迁 Cocos，换一套实现即可，逻辑内核不动。
+**渲染后端约定**：
+- M0 用 **Three.js**（WebGL）实现；小游戏端复用同一套 Three.js 场景，替换成小游戏的 canvas/adapter。
+- 几何与材质**全部代码生成**（`BufferGeometry` + 程序化描边），配置表里只有 key 与变换，没有模型文件路径。
+- 逻辑坐标（`BattleEvent.x`）与 3D 世界坐标的换算只在渲染层做，内核永远不知道 3D 的存在。
 
 ---
 
