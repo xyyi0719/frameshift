@@ -1,20 +1,20 @@
 name: Deploy
 
-# 推送到 main 就构建 + 测试 + 同步到阿里云，线上地址：
-#   https://8-138-133-118.sslip.io:8444/frameshift/
+# 推送到 main：构建 + 测试 + 同步到阿里云
+# 线上：https://8-138-133-118.sslip.io:8444/chick/
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
 concurrency:
-  group: deploy-frameshift
+  group: deploy-chick
   cancel-in-progress: true
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -43,18 +43,18 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$DEPLOY_USER@$DEPLOY_HOST" \
+            'mkdir -p /var/www/chick'
           rsync -az --delete --chmod=D755,F644 \
             -e "ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes" \
-            dist/ "$DEPLOY_USER@$DEPLOY_HOST:/var/www/frameshift/"
-          # 部署目录归 deploy 用户所有，nginx 以 www-data 读取，需保持可读
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes \
-            "$DEPLOY_USER@$DEPLOY_HOST" \
-            'chmod -R u+rwX,go+rX /var/www/frameshift && ls -l /var/www/frameshift/index.html'
+            dist/ "$DEPLOY_USER@$DEPLOY_HOST:/var/www/chick/"
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$DEPLOY_USER@$DEPLOY_HOST" \
+            'chmod -R u+rwX,go+rX /var/www/chick && ls -l /var/www/chick/index.html'
 
       - name: Smoke test
         run: |
           set -euo pipefail
-          URL="https://8-138-133-118.sslip.io:8444/frameshift/"
+          URL="https://8-138-133-118.sslip.io:8444/chick/"
           code=$(curl -s -o /dev/null -w '%{http_code}' "$URL")
           echo "GET $URL -> $code"
           test "$code" = "200"
