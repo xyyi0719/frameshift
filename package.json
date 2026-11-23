@@ -1,0 +1,19 @@
+{
+  "name": "frameshift",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Frameshift - a gene-editing puzzle game for GitHub Game Off 2026 (theme: SHIFT)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.9"
+  }
+}
