@@ -2,3 +2,6 @@ node_modules/
 dist/
 .vite/
 *.local
+
+# 对话记录只留在本地，不进仓库
+docs/conversation.md
