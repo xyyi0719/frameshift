@@ -8,12 +8,16 @@
  */
 
 import {
+  BASE_ORDER,
   MAX_SEQUENCE_LENGTH,
   Session,
   decode,
   diffGenes,
   judge,
+  hintFor,
+  hintsFor,
   phenotype as derivePhenotype,
+  previewEdit,
   type Base,
   type Edit,
   type EditOp,
@@ -23,8 +27,11 @@ import {
   type GeneDiff,
   type GeneIssue,
   type Judgement,
+  type Family,
   type Level,
+  type PartId,
   type Phenotype,
+  type StatKey,
   type SessionEvent,
 } from '../core';
 import { LEVELS } from '../levels';
@@ -35,11 +42,21 @@ import { Legend } from './legend';
 import { Sound } from './audio';
 import { buildCreature, drawCreature } from './creature';
 import { BASE_COLORS, COLORS } from './theme';
+import { PreviewPanel } from './preview';
+import type { PreviewRow } from './preview';
+import { Coach, coachStepTexts } from './coach';
+import { BaseTray } from './tray';
+import { DragController } from './drag';
 import { prefersReducedMotion } from './anim';
 import {
+  gateHint,
+  gateLabel,
   getLanguage,
+  goalExplanation,
+  hintInsertBase,
   initLanguage,
   levelHint,
+  levelObjective,
   levelIntro,
   levelName,
   levelSpecies,
@@ -60,6 +77,7 @@ interface BestiaryEntry {
 
 const BESTIARY_KEY = 'frameshift.bestiary.v1';
 const GUIDE_KEY = 'frameshift.guided.v1';
+const COACH_KEY = 'frameshift.coach.v1';
 
 export class App {
   private readonly root: HTMLElement;
@@ -74,6 +92,8 @@ export class App {
   private readonly ribbon: GeneRibbon;
   private readonly stage: Stage;
   private readonly legend: Legend;
+  private readonly tray: BaseTray;
+  private readonly drag: DragController;
   private readonly sound = new Sound();
 
   private readonly toastEl: HTMLElement;
@@ -96,6 +116,15 @@ export class App {
   private bestiary: BestiaryEntry[] = [];
   private debugEl: HTMLPreElement | null = null;
   private lastResult: Judgement | null = null;
+  private previewPanel: PreviewPanel | null = null;
+  private coach: Coach | null = null;
+  private coachPlayed = false;
+  private coachStep = 0;
+  private failStreak = 0;
+  private hintSeq = '';
+  private hintShown = 0;
+  private lastFailJudgement: Judgement | null = null;
+  private touchGap: number | null = null;
 
   constructor(root: HTMLElement) {
     initLanguage();
@@ -143,10 +172,11 @@ export class App {
       onToggleMute: () => this.toggleMute(),
       onToggleLegend: () => this.toggleLegend(),
       onHelp: () => this.openGuide(),
+      onHint: () => this.requestHint(),
       onLanguage: (lang) => this.changeLanguage(lang),
     });
 
-    this.legend = new Legend(legendHost);
+    this.legend = new Legend(legendHost, (partId) => this.previewLegendPart(partId));
     this.loadBestiary();
 
     this.ribbon = new GeneRibbon(ribbonHost, this.level, this.currentGene, {
@@ -157,12 +187,28 @@ export class App {
       onModeChange: (mode) => this.hud.setMode(mode),
       onHoverPart: (index) => this.stage.setHighlightPart(index),
       onEscape: () => this.closeGuide(),
+      onPreview: (req) => this.showPreview(req),
+      onBaseDragStart: (index, base, x, y) => this.drag?.startBase(index, base, x, y),
+      onGapTap: (index) => this.openTouchPreview(index),
     });
 
     this.stage = new Stage(stageHost, this.level, this.currentPhenotype, {
       onPass: (j) => this.handlePass(j),
       onFail: (j) => this.handleFail(j),
     });
+
+    this.previewPanel = new PreviewPanel(stageHost);
+    this.tray = new BaseTray(ribbonHost, (base, event) => this.drag?.startTray(base, event));
+    this.drag = new DragController(this.ribbon, {
+      onInsert: (base, index) => this.performEdit({ op: 'insert', index, base }),
+      onDelete: (index) => this.performEdit({ op: 'delete', index }),
+      onMove: (from, to, base) => this.moveBase(from, to, base),
+      onPreview: (req) => this.showDragPreview(req),
+      onActive: (active) => {
+        if (active) this.cancelCoach();
+      },
+    });
+    this.coach = new Coach(root);
 
     this.hud.setMuted(this.sound.isMuted());
     this.hud.setLegendOpen(true);
@@ -173,7 +219,7 @@ export class App {
     this.applyDocumentLanguage();
     this.renderBestiary();
     this.showBrief();
-    this.maybeShowGuide();
+    this.maybeStartCoach();
     this.updateDebug();
 
     this.raf = requestAnimationFrame(this.frame);
@@ -208,8 +254,13 @@ export class App {
     this.renderBestiary();
     this.ribbon.refreshLanguage();
     this.stage.refreshLanguage();
+    this.tray.refreshLanguage();
+    this.drag.refreshLanguage();
     if (!this.modalEl.hidden && this.lastResult) this.showResultCard(this.lastResult);
     if (!this.guideEl.hidden) this.renderGuide();
+    this.closeTouchPreview();
+    this.previewPanel?.hide();
+    if (this.coach?.active) this.startCoach(this.coachStep);
     this.refreshNoteForLanguage();
     this.hideToast();
     this.updateDebug();
@@ -224,13 +275,345 @@ export class App {
     if (kind === 'bad') {
       this.syncIssueNote(this.currentGene);
     } else if (kind === 'hint') {
-      this.showNote(t('state.hint', { hint: levelHint(this.level) }), 'hint', true);
+      const text = this.lastFailJudgement
+        ? this.failureSentence(this.lastFailJudgement)
+        : t('state.hint', { hint: levelHint(this.level) });
+      this.showNote(text, 'hint', true);
     } else if (kind === 'info') {
       this.clearNote();
     }
   }
 
+  /* ==========================================================================
+   * 悬停预览
+   * ========================================================================== */
+
+  /** 只在 hover/键盘事件里调用；同一次悬停 App 收到一次，避免每帧全量解码。 */
+  private showPreview(req: { op: 'insert' | 'delete' | 'replace'; index: number } | null): void {
+    if (!this.previewPanel) return;
+    // 触屏的 4 张幽灵卡是「待确认」状态，不能被 pointerleave 的 hover 清理关掉。
+    if (this.touchGap !== null) return;
+    if (req && this.coach?.active) this.cancelCoach();
+    if (!req || this.stage.isRunning() || this.hud.getRunState() === 'passed') {
+      this.previewPanel.hide();
+      return;
+    }
+    const seq = this.currentGene.seq;
+    if (!this.level.ops.includes(req.op)) {
+      this.previewPanel.hide();
+      return;
+    }
+    const titleKey =
+      req.op === 'insert'
+        ? 'preview.titleInsert'
+        : req.op === 'delete'
+          ? 'preview.titleDelete'
+          : 'preview.titleReplace';
+    const title = t(titleKey, { n: req.op === 'insert' ? req.index : req.index + 1 });
+    const free = t('preview.free');
+
+    if (req.op === 'insert') {
+      this.previewPanel.show({
+        title,
+        free,
+        rows: BASE_ORDER.map((base) => this.buildPreviewRow(base, req.index, base)),
+      });
+      return;
+    }
+    const row = this.buildPreviewRow(null, req.index, null);
+    this.previewPanel.show({ title, free, rows: [{ ...row, base: undefined }] });
+  }
+
+  /** 本关第一个闸门的第一条要求（前两关都只有一个）。 */
+  private gateNeed(): { stat: StatKey; min: number } {
+    const gate = this.level.gates[0];
+    const req = gate?.requires[0];
+    return req ? { stat: req.stat, min: req.min } : { stat: 'stride', min: 0 };
+  }
+
+  private buildPreviewRow(
+    base: Base | null,
+    index: number,
+    label: Base | null,
+  ): PreviewRow {
+    const mode = this.ribbon.getMode();
+    const req: EditRequest =
+      mode === 'delete'
+        ? { op: 'delete', index }
+        : mode === 'replace' && base
+          ? { op: 'replace', index, base }
+          : base
+            ? { op: 'insert', index, base }
+            : { op: 'delete', index };
+    const result = previewEdit(this.currentGene.seq, req);
+    if (!result) {
+      return {
+        base: label ?? undefined,
+        phenotype: null,
+        chain: '',
+        status: t('preview.noOption'),
+        tone: 'invalid',
+        best: false,
+      };
+    }
+    return this.previewRowFromResult(label ?? undefined, result.gene, result.phenotype);
+  }
+
+  private previewRowFromResult(
+    base: Base | undefined,
+    gene: Gene,
+    phenotype: Phenotype,
+  ): PreviewRow {
+    const chain =
+      gene.parts.length > 0
+        ? gene.parts.map((p) => partLabel(p.id)).join(' · ')
+        : t('preview.noParts');
+    if (gene.issue !== null) {
+      const key =
+        gene.issue === 'no_stop'
+          ? 'preview.invalidNoStop'
+          : gene.issue === 'no_start'
+            ? 'preview.invalidNoStart'
+            : 'preview.invalidReading';
+      return {
+        base,
+        phenotype,
+        chain,
+        status: t(key),
+        tone: 'invalid',
+        best: false,
+      };
+    }
+    const verdict = judge(this.level, gene, phenotype);
+    const need = this.gateNeed();
+    if (verdict.outcome === 'pass') {
+      return {
+        base,
+        phenotype,
+        chain,
+        status: t('preview.pass', {
+          stat: statLabel(need.stat),
+          actual: phenotype.stats[need.stat],
+          min: need.min,
+        }),
+        tone: 'pass',
+        best: true,
+      };
+    }
+    return {
+      base,
+      phenotype,
+      chain,
+      status: t('preview.fail', {
+        stat: statLabel(need.stat),
+        actual: phenotype.stats[need.stat],
+        min: need.min,
+        short: Math.max(0, need.min - phenotype.stats[need.stat]),
+      }),
+      tone: 'fail',
+      best: false,
+    };
+  }
+
+  /** 拖拽过程中只预览「当前拖着的这个碱基」，不铺四张。 */
+  private showDragPreview(req: { base: Base; index: number; fromIndex?: number } | null): void {
+    if (!this.previewPanel) return;
+    if (req && this.coach?.active) this.cancelCoach();
+    if (!req || this.stage.isRunning() || this.hud.getRunState() === 'passed') {
+      this.previewPanel.hide();
+      return;
+    }
+    const seq = this.currentGene.seq;
+    if (req.fromIndex !== undefined) {
+      if (req.index === req.fromIndex || req.index === req.fromIndex + 1) {
+        this.previewPanel.hide();
+        return;
+      }
+      const removed = previewEdit(seq, { op: 'delete', index: req.fromIndex });
+      if (!removed) {
+        this.previewPanel.hide();
+        return;
+      }
+      const insertAt = req.index > req.fromIndex ? req.index - 1 : req.index;
+      const moved = previewEdit(removed.seq, { op: 'insert', index: insertAt, base: req.base });
+      if (!moved) {
+        this.previewPanel.hide();
+        return;
+      }
+      const row = this.previewRowFromResult(req.base, moved.gene, moved.phenotype);
+      this.previewPanel.show({
+        title: t('preview.titleMove', { n: req.fromIndex + 1 }),
+        free: t('preview.free'),
+        rows: [row],
+      });
+      return;
+    }
+    const result = previewEdit(seq, { op: 'insert', index: req.index, base: req.base });
+    if (!result) {
+      this.previewPanel.hide();
+      return;
+    }
+    const row = this.previewRowFromResult(req.base, result.gene, result.phenotype);
+    this.previewPanel.show({
+      title: t('preview.titleInsert', { n: req.index }),
+      free: t('preview.free'),
+      rows: [row],
+    });
+  }
+
+  /** 触屏：点缝隙先展示四张幽灵卡，再点其中一张落子。 */
+  private openTouchPreview(index: number): void {
+    if (!this.previewPanel || this.stage.isRunning() || this.hud.getRunState() === 'passed') return;
+    this.cancelCoach();
+    this.touchGap = index;
+    this.ribbon.setDropIndicator({ kind: 'insert', index });
+    this.previewPanel.show(
+      {
+        title: t('preview.titleInsert', { n: index }),
+        free: t('preview.free'),
+        rows: BASE_ORDER.map((base) => this.buildPreviewRow(base, index, base)),
+      },
+      {
+        interactive: true,
+        onPick: (base) => {
+          const gap = this.touchGap;
+          this.closeTouchPreview();
+          if (gap !== null) this.performEdit({ op: 'insert', index: gap, base });
+        },
+        onClose: () => this.closeTouchPreview(),
+      },
+    );
+  }
+
+  private closeTouchPreview(): void {
+    this.touchGap = null;
+    this.previewPanel?.hide();
+    this.ribbon.setDropIndicator(null);
+  }
+
+  /** 拖动换位 = 删一次 + 插一次，老实计 2 刀。 */
+  private moveBase(from: number, to: number, base: Base): void {
+    if (from < 0 || from === to || to === from + 1) return;
+    this.cancelCoach();
+    const removed = this.session.remove(from);
+    if (!removed.ok) {
+      this.showToast(rejectionText(removed.reason), 'bad');
+      return;
+    }
+    const insertAt = to > from ? to - 1 : to;
+    const inserted = this.session.insert(insertAt, base);
+    if (!inserted.ok) {
+      this.session.undo();
+      this.showToast(rejectionText(inserted.reason), 'bad');
+      return;
+    }
+    this.showToast(t('toast.moved'), 'info');
+  }
+
+  /* ==========================================================================
+   * 提示
+   * ========================================================================== */
+
+  private requestHint(): void {
+    this.sound.unlock();
+    if (this.stage.isRunning()) return;
+    const seq = this.currentGene.seq;
+    if (this.hintSeq !== seq) {
+      this.hintSeq = seq;
+      this.hintShown = 0;
+    }
+    const hints = hintsFor(this.level, seq, 5);
+    const req = hints.length > 0
+      ? hints[this.hintShown % hints.length]
+      : hintFor(this.level, seq);
+    if (!req) {
+      this.showToast(t('hint.none'), 'info');
+      return;
+    }
+    this.hintShown += 1;
+    this.ribbon.showHint(req);
+    this.hud.setMode(req.op);
+    const text =
+      req.op === 'delete'
+        ? t('hint.delete')
+        : req.op === 'replace'
+          ? t('hint.replace', { base: hintInsertBase(req.base ?? 'U') })
+          : t('hint.insert', { base: hintInsertBase(req.base ?? 'U') });
+    this.showToast(text, 'ok');
+    this.sound.play('click');
+    this.cancelCoach();
+  }
+
+  /* ==========================================================================
+   * 贴画布的三步引导
+   * ========================================================================== */
+
+  private maybeStartCoach(): void {
+    if (this.levelIndex !== 0) return;
+    let seen = false;
+    try {
+      seen = localStorage.getItem(COACH_KEY) === '1';
+    } catch {
+      seen = false;
+    }
+    if (seen || !this.coach) return;
+    window.setTimeout(() => {
+      if (this.guideEl.hidden === false) return;
+      this.startCoach();
+    }, 650);
+  }
+
+  private coachSteps(): { target: { x: number; y: number; w: number; h: number }; title: string; body: string }[] {
+    const texts = coachStepTexts();
+    const start = this.ribbon.getStartAnchor();
+    const gap = this.ribbon.getGapAnchor(2);
+    const stageBox = (this.root.querySelector('#stage') as HTMLElement).getBoundingClientRect();
+    const gate = this.level.gates[0];
+    const gateX = gate ? stageBox.left + stageBox.width * (0.085 + gate.at * 0.835) : stageBox.left + stageBox.width / 2;
+    const gateAnchor = {
+      x: gateX - 70,
+      y: stageBox.bottom - stageBox.height * 0.62,
+      w: 140,
+      h: 120,
+    };
+    const targets = [start, gap, gateAnchor];
+    return texts.map((text, i) => ({ target: targets[i], ...text }));
+  }
+
+  private startCoach(fromStep = 0): void {
+    if (!this.coach) return;
+    this.briefEl.hidden = true;
+    this.coachPlayed = true;
+    this.coach.start(
+      this.coachSteps(),
+      () => {
+        try {
+          localStorage.setItem(COACH_KEY, '1');
+        } catch {
+          /* 忽略 */
+        }
+        this.coachPlayed = false;
+      },
+      (index) => {
+        this.coachStep = index;
+      },
+      fromStep,
+    );
+  }
+
+  private cancelCoach(): void {
+    if (!this.coach?.active) return;
+    this.coach.stop();
+    this.coachPlayed = false;
+    try {
+      localStorage.setItem(COACH_KEY, '1');
+    } catch {
+      /* 忽略 */
+    }
+  }
+
   openGuide(): void {
+    this.cancelCoach();
     this.guideStep = 0;
     this.guideEl.hidden = false;
     this.renderGuide();
@@ -249,10 +632,7 @@ export class App {
 
   private bindGlobal(): void {
     window.addEventListener('resize', () => {
-      // canvas 各自用 ResizeObserver；这里只处理图例抽屉的极端尺寸。
-      if (window.innerWidth < 720 && this.legendOpen) {
-        // 小屏默认保持展开（需求），不自动收起。
-      }
+      if (this.coach?.active) this.startCoach(this.coachStep);
     });
 
     window.addEventListener('keydown', (e) => {
@@ -296,16 +676,31 @@ export class App {
   private applyLevelUi(): void {
     const level = this.level;
     this.hud.setLevel(level);
-    this.hud.setBudget(this.session.budgetLeft, level.budget);
+    this.hud.setEdits(this.session.budgetUsed, this.session.par, this.session.overBudget);
     this.hud.setStats(this.currentPhenotype, level.hudStats);
     this.hud.setMode(this.ribbon.getMode());
     this.hud.setUndoEnabled(this.session.canUndo);
     this.hud.setRunState(this.currentGene.issue ? 'invalid' : 'ready');
+    this.tray.setEnabled(true);
+    this.legend.setAutoExpand(this.expandedFamilies());
     this.legend.setGene(this.currentGene);
     this.stage.setJudgement(this.currentJudgement);
     this.stage.setIssue(this.currentGene.issue);
     this.ribbon.setLocked(false);
     document.body.dataset.level = level.id;
+  }
+
+  /** 当前关卡要用的家族：只展开真正相关的部分（渐进披露）。 */
+  private expandedFamilies(): Family[] {
+    const families = new Set<Family>(['A']);
+    for (const gate of this.level.gates) {
+      for (const req of gate.requires) {
+        if (req.stat === 'stride') families.add('U');
+        if (req.stat === 'flight' || req.stat === 'armor' || req.stat === 'spikes') families.add('G');
+        if (req.stat === 'swim' || req.stat === 'glow' || req.stat === 'bite') families.add('C');
+      }
+    }
+    return [...families];
   }
 
   private loadLevel(index: number): void {
@@ -327,6 +722,9 @@ export class App {
     this.applyLevelUi();
     this.subscribe();
     this.legend.setGene(this.currentGene);
+    this.failStreak = 0;
+    this.lastFailJudgement = null;
+    this.hud.setHintAttention(false);
     this.showBrief();
     this.updateDebug();
   }
@@ -354,6 +752,7 @@ export class App {
   }
 
   private handleEditEvent(event: Extract<SessionEvent, { type: 'edit' }>): void {
+    this.closeTouchPreview();
     const diff = event.diff;
     this.currentGene = event.gene;
     this.currentPhenotype = event.phenotype;
@@ -365,11 +764,15 @@ export class App {
     this.stage.setIssue(event.gene.issue);
     this.stage.setJudgement(this.currentJudgement);
     this.legend.setGene(event.gene);
-    this.hud.setBudget(this.level.budget - event.budgetUsed, this.level.budget);
+    this.hud.setEdits(event.budgetUsed, this.level.budget, event.budgetUsed > this.level.budget);
     this.hud.setStats(event.phenotype, this.level.hudStats);
     this.hud.setUndoEnabled(event.budgetUsed > 0);
     this.hud.setRunState(event.gene.issue ? 'invalid' : 'ready');
+    this.tray.setEnabled(true);
     this.failHintToken += 1;
+    this.lastFailJudgement = null;
+    this.failStreak = 0;
+    this.hud.setHintAttention(false);
     this.clearNote();
     this.syncIssueNote(event.gene);
     this.updateDebug();
@@ -392,6 +795,7 @@ export class App {
   }
 
   private handleUndoEvent(event: Extract<SessionEvent, { type: 'undo' }>): void {
+    this.closeTouchPreview();
     const before = this.currentGene;
     const after = event.gene;
     this.currentGene = after;
@@ -413,11 +817,15 @@ export class App {
     this.stage.setIssue(after.issue);
     this.stage.setJudgement(this.currentJudgement);
     this.legend.setGene(after);
-    this.hud.setBudget(this.level.budget - event.budgetUsed, this.level.budget);
+    this.hud.setEdits(event.budgetUsed, this.level.budget, event.budgetUsed > this.level.budget);
     this.hud.setStats(event.phenotype, this.level.hudStats);
     this.hud.setUndoEnabled(event.budgetUsed > 0);
     this.hud.setRunState(after.issue ? 'invalid' : 'ready');
+    this.tray.setEnabled(true);
     this.failHintToken += 1;
+    this.failStreak = 0;
+    this.lastFailJudgement = null;
+    this.hud.setHintAttention(false);
     this.clearNote();
     this.syncIssueNote(after);
     this.updateDebug();
@@ -426,6 +834,7 @@ export class App {
   }
 
   private handleResetEvent(event: Extract<SessionEvent, { type: 'reset' }>): void {
+    this.closeTouchPreview();
     this.currentGene = event.gene;
     this.currentPhenotype = event.phenotype;
     this.currentJudgement = judge(this.level, event.gene, event.phenotype);
@@ -435,11 +844,15 @@ export class App {
     this.stage.setIssue(event.gene.issue);
     this.stage.setJudgement(this.currentJudgement);
     this.legend.setGene(event.gene);
-    this.hud.setBudget(this.level.budget - event.budgetUsed, this.level.budget);
+    this.hud.setEdits(event.budgetUsed, this.level.budget, event.budgetUsed > this.level.budget);
     this.hud.setStats(event.phenotype, this.level.hudStats);
     this.hud.setUndoEnabled(false);
     this.hud.setRunState(event.gene.issue ? 'invalid' : 'ready');
+    this.tray.setEnabled(true);
     this.failHintToken += 1;
+    this.failStreak = 0;
+    this.lastFailJudgement = null;
+    this.hud.setHintAttention(false);
     this.hideCard();
     this.clearNote();
     this.syncIssueNote(event.gene);
@@ -461,6 +874,15 @@ export class App {
   /* ==========================================================================
    * 用户操作
    * ========================================================================== */
+
+  private previewLegendPart(partId: PartId | null): void {
+    if (!partId) {
+      this.stage.setHighlightPart(null);
+      return;
+    }
+    const part = this.currentPhenotype.parts.find((p) => p.id === partId);
+    this.stage.setHighlightPart(part ? part.index : null);
+  }
 
   private setMode(mode: EditOp): void {
     this.sound.unlock();
@@ -507,6 +929,7 @@ export class App {
   }
 
   private run(): void {
+    this.closeTouchPreview();
     this.sound.unlock();
     if (this.stage.isRunning()) return;
     if (this.hud.getRunState() === 'passed') return;
@@ -523,6 +946,7 @@ export class App {
     this.hud.setRunState('running');
     this.hud.setUndoEnabled(false);
     this.ribbon.setLocked(true);
+    this.tray.setEnabled(false);
     this.stage.setJudgement(judgement);
     this.sound.play('click');
     const started = this.stage.run(judgement);
@@ -534,12 +958,19 @@ export class App {
   }
 
   private handlePass(judgement: Judgement): void {
+    this.closeTouchPreview();
+    this.cancelCoach();
     this.hud.setRunState('passed');
     this.hud.setUndoEnabled(false);
     this.ribbon.setLocked(true);
+    this.tray.setEnabled(false);
     this.clearNote();
     this.failHintToken += 1;
     this.sound.play('success');
+    this.showNote(this.passSentence(judgement), 'info', false);
+    this.failStreak = 0;
+    this.lastFailJudgement = null;
+    this.hud.setHintAttention(false);
     this.logSpecimen();
     this.showResultCard(judgement);
     this.updateDebug(judgement);
@@ -549,14 +980,59 @@ export class App {
     this.hud.setRunState('failed');
     this.hud.setUndoEnabled(this.session.canUndo);
     this.ribbon.setLocked(false);
+    this.tray.setEnabled(true);
     this.sound.play('fail');
     this.updateDebug(judgement);
+    this.lastFailJudgement = judgement;
+    this.failStreak += 1;
+    if (this.failStreak >= 2) this.hud.setHintAttention(true);
+    this.showNote(this.failureSentence(judgement), 'hint', true);
     const token = ++this.failHintToken;
     window.setTimeout(() => {
       if (token !== this.failHintToken) return;
       if (this.stage.getPhase() !== 'failed') return;
-      this.showNote(t('state.hint', { hint: levelHint(this.level) }), 'hint', true);
-    }, 620);
+      if (this.failStreak < 2) return;
+      this.showNote(`${this.failureSentence(judgement)}  ${t('state.hint', { hint: levelHint(this.level) })}`, 'hint', true);
+    }, 2600);
+  }
+
+  /** 失败讲人话：数零件 + 给出算式。 */
+  private failureSentence(judgement: Judgement): string {
+    const gate = judgement.failedGateIndex !== null ? this.level.gates[judgement.failedGateIndex] : this.level.gates[0];
+    const req = gate?.requires[0];
+    const phen = judgement.phenotype;
+    if (!req) return levelHint(this.level);
+    const count = (id: string): number => phen.parts.filter((p) => p.id === id).length;
+    const actual = phen.stats[req.stat];
+    if (req.stat === 'stride') {
+      return t('fail.stride', {
+        gills: count('gill'),
+        legs: count('leg') + count('longleg') + count('claw'),
+        actual,
+        need: req.min,
+      });
+    }
+    if (req.stat === 'flight') {
+      return t('fail.flight', {
+        plates: count('shell'),
+        wings: count('wing'),
+        actual,
+        need: req.min,
+      });
+    }
+    return t('fail.generic', { stat: statLabel(req.stat), actual, need: req.min });
+  }
+
+  private passSentence(judgement: Judgement): string {
+    const gate = this.level.gates[0];
+    const req = gate?.requires[0];
+    if (!req || !gate) return '';
+    return t('success.explain', {
+      stat: statLabel(req.stat),
+      actual: judgement.phenotype.stats[req.stat],
+      need: req.min,
+      gate: gateLabel(gate),
+    });
   }
 
   private toggleMute(): void {
@@ -715,10 +1191,19 @@ export class App {
 
     const score = document.createElement('div');
     score.className = 'result-score';
+    const overPar = used > this.session.par;
     const editsChip = document.createElement('span');
-    editsChip.className = 'result-chip';
-    editsChip.textContent = t('result.edits', { used, par: level.parEdits });
+    editsChip.className = 'result-chip' + (overPar ? ' over-par' : '');
+    editsChip.textContent = overPar
+      ? t('result.overPar', { used, par: this.session.par })
+      : t('result.edits', { used, par: this.session.par });
     score.appendChild(editsChip);
+    if (used === this.session.par) {
+      const stamp = document.createElement('span');
+      stamp.className = 'result-par-stamp';
+      stamp.textContent = t('result.parStamp');
+      score.appendChild(stamp);
+    }
     for (const key of level.hudStats) {
       const chip = document.createElement('span');
       chip.className = 'result-chip';
@@ -729,6 +1214,10 @@ export class App {
       score.appendChild(chip);
     }
     info.appendChild(score);
+    const explain = document.createElement('p');
+    explain.className = 'result-explain';
+    explain.textContent = this.passSentence(judgement);
+    info.appendChild(explain);
     top.appendChild(info);
     card.appendChild(top);
 
@@ -880,8 +1369,9 @@ export class App {
     ctx.stroke();
 
     const layout = buildCreature(phen);
-    if (layout.slots.length === 0) return;
-    const scale = Math.min((w - 30) / layout.length, (h - 24) / 96, 0.95);
+    if (layout.n === 0) return;
+    const effH = layout.H;
+    const scale = Math.min((w - 30) / layout.L, (h - 12) / (effH * 2.6), 0.95);
     drawCreature(ctx, layout, w / 2, h - 9, scale, {
       now: performance.now(),
       running: false,
@@ -1037,8 +1527,6 @@ function rejectionText(reason: EditRejection): string {
   switch (reason) {
     case 'locked_op':
       return t('toast.lockedOp');
-    case 'no_budget':
-      return t('toast.noBudget');
     case 'index_out_of_range':
       return t('toast.outOfRange');
     case 'invalid_base':
@@ -1047,6 +1535,9 @@ function rejectionText(reason: EditRejection): string {
       return t('toast.tooLong', { n: MAX_SEQUENCE_LENGTH });
     case 'no_change':
       return t('toast.noChange');
+    case 'no_budget':
+      // PAR 语义下核心不再返回这个原因；保留类型兜底即可。
+      return t('toast.editRejected');
     default: {
       const _never: never = reason;
       void _never;

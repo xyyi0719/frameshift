@@ -12,9 +12,11 @@ import type {
   GeneIssue,
   Judgement,
   Level,
+  PartId,
   Phenotype,
   StatKey,
 } from '../core';
+import { PART_BY_ID } from '../core';
 import {
   buildCreature,
   drawCreature,
@@ -31,8 +33,21 @@ import {
   progress,
   prefersReducedMotion,
 } from './anim';
-import { COLORS, FONT_MONO } from './theme';
-import { displayUpper, gateLabel, statLabel, t } from './i18n';
+import { COLORS, FAMILY_COLORS, FONT_MONO } from './theme';
+import { displayUpper, gateLabel, goalExplanation, statLabel, t } from './i18n';
+import { drawPart } from './parts-art';
+
+const STAT_ART: Readonly<Record<StatKey, PartId>> = {
+  stride: 'leg',
+  flight: 'wing',
+  swim: 'fin',
+  armor: 'shell',
+  spikes: 'spike',
+  glow: 'glow',
+  sight: 'eye',
+  grip: 'claw',
+  bite: 'maw',
+};
 
 export interface StageCallbacks {
   onPass: (judgement: Judgement) => void;
@@ -304,7 +319,7 @@ export class Stage {
   }
 
   private get trackX0(): number {
-    return Math.max(96, this.width * 0.085);
+    return this.width < 560 ? 76 : Math.max(96, this.width * 0.085);
   }
 
   private get trackX1(): number {
@@ -316,7 +331,7 @@ export class Stage {
   }
 
   private get creatureScale(): number {
-    return clamp(Math.min(this.width / 820, this.height / 370), 0.58, 2.25);
+    return clamp(Math.min(this.width / 760, this.height / 350), 0.62, 2.2);
   }
 
   private gateAtPoint(x: number, y: number): number | null {
@@ -1001,7 +1016,9 @@ export class Stage {
     });
     const met = gate.mode === 'any' ? results.some((r) => r.met) : results.every((r) => r.met);
     const color = broken ? COLORS.ok : met ? COLORS.accent : COLORS.warn;
-    const plateY = Math.max(36, y - 206);
+    const compact = this.width < 560;
+    const plateY = compact ? 2 : Math.max(36, y - 226);
+    const plateBottom = plateY + (compact ? 42 : 71);
     const label = displayUpper(gateLabel(gate));
 
     ctx.save();
@@ -1013,40 +1030,82 @@ export class Stage {
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 5]);
     ctx.beginPath();
-    ctx.moveTo(x, plateY + 48);
+    ctx.moveTo(x, plateBottom);
     ctx.lineTo(x, y - 18);
     ctx.stroke();
     ctx.setLineDash([]);
 
     // 名字牌
-    ctx.font = `700 11px ${FONT_MONO}`;
-    const labelW = Math.max(96, ctx.measureText(label).width + 26);
+    ctx.font = compact ? `700 9px ${FONT_MONO}` : `700 11px ${FONT_MONO}`;
+    const labelW = Math.max(compact ? 80 : 96, ctx.measureText(label).width + (compact ? 18 : 26));
     ctx.beginPath();
-    roundRectPath(ctx, x - labelW / 2, plateY, labelW, 23, 4);
+    roundRectPath(ctx, x - labelW / 2, plateY, labelW, compact ? 17 : 23, 4);
     ctx.fillStyle = 'rgba(6, 14, 20, 0.82)';
     ctx.fill();
     ctx.strokeStyle = withAlphaSafe(color, broken ? 0.5 : 0.42);
     ctx.lineWidth = 1;
     ctx.stroke();
     ctx.fillStyle = broken ? COLORS.ok : 'rgba(220, 235, 242, 0.9)';
-    ctx.fillText(label, x, plateY + 12);
+    ctx.fillText(label, x, plateY + (compact ? 9 : 12));
 
-    // 要求牌
+    // 需求图标：4 个靴子（每格代表 1 点需求），再补一行文字
+    const iconY = compact ? plateY + 26 : plateY + 37;
+    const iconSize = compact ? 13 : 15;
+    const iconGap = 4;
+    let totalW = 0;
+    const groups: { stat: StatKey; actual: number; min: number }[] = [];
+    for (const r of results) {
+      totalW += r.req.min * (iconSize + iconGap) + (groups.length > 0 ? 7 : 0);
+      groups.push({ stat: r.req.stat, actual: r.actual, min: r.req.min });
+    }
+
     const reqText = results
       .map((r) => `${statLabel(r.req.stat)} ${r.actual}/${r.req.min}`)
       .join('   ');
     const prefix = gate.mode === 'any' ? t('common.any') : t('common.all');
     const full = t('stage.requirement', { mode: prefix, reqs: reqText });
+    const explain = compact ? '' : goalExplanation(results[0]?.req.stat ?? 'stride');
     ctx.font = `600 8.5px ${FONT_MONO}`;
-    const reqW = Math.max(labelW, ctx.measureText(full).width + 18);
+    const textW = ctx.measureText(full).width;
+    ctx.font = `500 7.5px ${FONT_MONO}`;
+    const explainW = explain ? ctx.measureText(explain).width : 0;
+    const plateW = Math.max(labelW, totalW + 20, textW + 20, explainW + 24);
+    const plateH = compact ? 23 : 45;
     ctx.beginPath();
-    roundRectPath(ctx, x - reqW / 2, plateY + 26, reqW, 18, 3);
-    ctx.fillStyle = 'rgba(6, 14, 20, 0.72)';
+    roundRectPath(ctx, x - plateW / 2, plateY + (compact ? 18 : 24), plateW, plateH, 4);
+    ctx.fillStyle = 'rgba(6, 14, 20, 0.58)';
     ctx.fill();
-    ctx.strokeStyle = withAlphaSafe(color, 0.22);
+    ctx.strokeStyle = withAlphaSafe(color, 0.16);
+    ctx.lineWidth = 1;
     ctx.stroke();
+
+    let iconX = x - totalW / 2;
+    for (const group of groups) {
+      const art = STAT_ART[group.stat];
+      const family = PART_BY_ID[art].family;
+      for (let i = 0; i < group.min; i += 1) {
+        const filled = i < group.actual;
+        if (group.stat === 'stride') {
+          this.drawBootIcon(ctx, iconX + iconSize / 2, iconY, iconSize, filled, FAMILY_COLORS[family]);
+        } else {
+          drawPart(ctx, art, iconX + iconSize / 2, iconY, iconSize, family, {
+            alpha: filled ? 1 : 0.34,
+          });
+        }
+        iconX += iconSize + iconGap;
+      }
+      iconX += 7;
+    }
+
+    ctx.font = `600 8.5px ${FONT_MONO}`;
     ctx.fillStyle = color;
-    ctx.fillText(full, x, plateY + 35);
+    ctx.fillText(full, x, plateY + (compact ? 38 : 53));
+
+    if (!compact) {
+      ctx.font = `500 7.5px ${FONT_MONO}`;
+      ctx.fillStyle = 'rgba(150, 180, 195, 0.78)';
+      ctx.fillText(explain, x, plateY + 66);
+    }
 
     // 停顿/失败时的判定牌
     const emphasis = this.judgementEmphasis(index, now);
@@ -1057,7 +1116,7 @@ export class Stage {
       ctx.globalAlpha = emphasis;
       ctx.font = `700 11px ${FONT_MONO}`;
       const vw = ctx.measureText(text).width + 30;
-      const vy = Math.max(8, plateY - 32);
+      const vy = compact ? plateY + 44 : Math.max(8, plateY - 32);
       ctx.beginPath();
       roundRectPath(ctx, x - vw / 2, vy, vw, 23, 4);
       ctx.fillStyle = 'rgba(5, 12, 17, 0.92)';
@@ -1079,6 +1138,38 @@ export class Stage {
         ctx.fillText('!', x - vw / 2 - 12, vy + 12);
       }
     }
+    ctx.restore();
+  }
+
+  private drawBootIcon(
+    ctx: CanvasRenderingContext2D,
+    cx: number,
+    cy: number,
+    size: number,
+    filled: boolean,
+    color: string,
+  ): void {
+    const s = size / 16;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(s, s);
+    ctx.globalAlpha = filled ? 1 : 0.42;
+    ctx.strokeStyle = color;
+    ctx.fillStyle = withAlphaSafe(color, filled ? 0.9 : 0.12);
+    ctx.lineWidth = 1.6;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-2, -7);
+    ctx.lineTo(2, -7);
+    ctx.lineTo(2, 1);
+    ctx.quadraticCurveTo(2, 4, 5, 4);
+    ctx.lineTo(6, 7);
+    ctx.lineTo(-5, 7);
+    ctx.lineTo(-5, -3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
     ctx.restore();
   }
 

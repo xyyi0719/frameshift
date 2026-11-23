@@ -11,6 +11,7 @@ import type { Lang } from './i18n';
 import {
   getLanguage,
   levelName,
+  levelObjective,
   levelSpecies,
   levelTarget,
   statLabel,
@@ -25,6 +26,7 @@ export interface HudCallbacks {
   onToggleMute: () => void;
   onToggleLegend: () => void;
   onHelp: () => void;
+  onHint: () => void;
   onLanguage: (lang: Lang) => void;
 }
 
@@ -38,12 +40,12 @@ export class Hud {
   private readonly nameEl: HTMLElement;
   private readonly speciesEl: HTMLElement;
   private readonly targetLabelEl: HTMLElement;
+  private readonly objectiveEl: HTMLElement;
   private readonly targetEl: HTMLElement;
   private readonly statsEl: HTMLElement;
   private readonly modesEl: HTMLElement;
   private readonly budgetEl: HTMLElement;
   private readonly budgetLabelEl: HTMLElement;
-  private readonly pipsEl: HTMLElement;
   private readonly modeButtons: Map<EditOp, HTMLButtonElement> = new Map();
   private readonly undoBtn: HTMLButtonElement;
   private readonly resetBtn: HTMLButtonElement;
@@ -51,6 +53,7 @@ export class Hud {
   private readonly muteBtn: HTMLButtonElement;
   private readonly legendBtn: HTMLButtonElement;
   private readonly helpBtn: HTMLButtonElement;
+  private readonly hintBtn: HTMLButtonElement;
   private readonly langSwitch: HTMLElement;
   private readonly langButtons: HTMLButtonElement[];
 
@@ -59,11 +62,13 @@ export class Hud {
   private runState: RunUiState = 'ready';
   private phenotype: Phenotype | null = null;
   private statKeys: readonly StatKey[] = [];
-  private budgetLeft = 0;
-  private budgetTotal = 0;
+  private editsUsed = 0;
+  private par = 0;
+  private overPar = false;
   private muted = false;
   private undoEnabled = false;
   private legendOpen = true;
+  private hintAttention = false;
 
   constructor(root: HTMLElement, callbacks: HudCallbacks) {
     this.root = root;
@@ -75,11 +80,12 @@ export class Hud {
         <div class="hud-species">—</div>
       </div>
       <div class="hud-target">
-        <div class="hud-target-line"><span class="hud-target-label"></span><p class="hud-target-text">—</p></div>
+        <div class="hud-target-line"><span class="hud-target-label"></span><p class="hud-objective">—</p></div>
+        <p class="hud-target-text">—</p>
         <div class="hud-stats" aria-live="polite"></div>
       </div>
       <div class="hud-tools">
-        <div class="hud-budget"><span class="budget-label"></span><span class="pips"></span></div>
+        <div class="hud-budget"><span class="budget-label"></span></div>
         <div class="hud-modes" role="group">
           <button type="button" data-mode="insert"></button>
           <button type="button" data-mode="delete"></button>
@@ -90,6 +96,7 @@ export class Hud {
           <button type="button" class="hud-reset"></button>
         </div>
         <button type="button" class="hud-run"></button>
+        <button type="button" class="hud-hint"></button>
         <button type="button" class="hud-icon hud-help" aria-label="">?</button>
         <button type="button" class="hud-icon hud-mute"></button>
         <button type="button" class="hud-icon hud-legend-toggle">▤</button>
@@ -105,12 +112,12 @@ export class Hud {
     this.nameEl = root.querySelector('.hud-name') as HTMLElement;
     this.speciesEl = root.querySelector('.hud-species') as HTMLElement;
     this.targetLabelEl = root.querySelector('.hud-target-label') as HTMLElement;
+    this.objectiveEl = root.querySelector('.hud-objective') as HTMLElement;
     this.targetEl = root.querySelector('.hud-target-text') as HTMLElement;
     this.statsEl = root.querySelector('.hud-stats') as HTMLElement;
     this.modesEl = root.querySelector('.hud-modes') as HTMLElement;
     this.budgetEl = root.querySelector('.hud-budget') as HTMLElement;
     this.budgetLabelEl = root.querySelector('.budget-label') as HTMLElement;
-    this.pipsEl = root.querySelector('.pips') as HTMLElement;
 
     root.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((btn) => {
       const mode = btn.dataset.mode as EditOp;
@@ -123,6 +130,7 @@ export class Hud {
     this.muteBtn = root.querySelector('.hud-mute') as HTMLButtonElement;
     this.legendBtn = root.querySelector('.hud-legend-toggle') as HTMLButtonElement;
     this.helpBtn = root.querySelector('.hud-help') as HTMLButtonElement;
+    this.hintBtn = root.querySelector('.hud-hint') as HTMLButtonElement;
     this.langSwitch = root.querySelector('.lang-switch') as HTMLElement;
     this.langButtons = [...root.querySelectorAll<HTMLButtonElement>('[data-lang]')];
 
@@ -132,6 +140,7 @@ export class Hud {
     this.muteBtn.addEventListener('click', () => this.callbacks.onToggleMute());
     this.legendBtn.addEventListener('click', () => this.callbacks.onToggleLegend());
     this.helpBtn.addEventListener('click', () => this.callbacks.onHelp());
+    this.hintBtn.addEventListener('click', () => this.callbacks.onHint());
     this.langButtons.forEach((btn) => {
       btn.addEventListener('click', () => {
         const lang = btn.dataset.lang;
@@ -159,6 +168,9 @@ export class Hud {
     this.resetBtn.textContent = t('common.reset');
     this.helpBtn.setAttribute('aria-label', t('hud.help'));
     this.helpBtn.title = t('hud.help');
+    this.hintBtn.textContent = t('hud.hint');
+    this.hintBtn.title = t('hud.hintTitle');
+    this.hintBtn.setAttribute('aria-label', t('hud.hintTitle'));
     this.legendBtn.setAttribute('aria-label', t('hud.legendAria'));
     this.legendBtn.title = t('hud.legendToggle');
     this.langSwitch.setAttribute('aria-label', t('app.chooseLanguage'));
@@ -179,7 +191,7 @@ export class Hud {
             : mode === 'delete'
               ? 'hud.modeDeleteTitle'
               : 'hud.modeReplaceTitle';
-        btn.title = allowed ? t(titleKey) : `${t(titleKey)} · ${t('hud.modeLockedTitle')}`;
+        btn.title = allowed ? t(titleKey) : `${t(titleKey)} · ${t('hud.modeLockedLater')}`;
       }
     }
     this.renderLevel();
@@ -187,7 +199,7 @@ export class Hud {
     this.renderRun();
     this.renderUndo();
     this.renderLegend();
-    this.renderBudget();
+    this.renderEdits();
   }
 
   setLevel(level: Level): void {
@@ -204,7 +216,7 @@ export class Hud {
           : mode === 'delete'
             ? 'hud.modeDeleteTitle'
             : 'hud.modeReplaceTitle';
-      btn.title = allowed ? t(titleKey) : `${t(titleKey)} · ${t('hud.modeLockedTitle')}`;
+      btn.title = allowed ? t(titleKey) : `${t(titleKey)} · ${t('hud.modeLockedLater')}`;
     }
   }
 
@@ -212,28 +224,47 @@ export class Hud {
     if (!this.level) return;
     this.nameEl.textContent = levelName(this.level);
     this.speciesEl.textContent = levelSpecies(this.level);
+    this.objectiveEl.textContent = levelObjective(this.level);
     const target = levelTarget(this.level);
     this.targetEl.textContent = target;
     this.targetEl.title = target;
     this.levelEl.title = `${levelName(this.level)} · ${levelSpecies(this.level)}`;
   }
 
-  setBudget(left: number, total: number): void {
-    this.budgetLeft = left;
-    this.budgetTotal = total;
-    this.renderBudget();
+  setEdits(used: number, par: number, overPar: boolean): void {
+    this.editsUsed = used;
+    this.par = par;
+    this.overPar = overPar;
+    this.renderEdits();
   }
 
-  private renderBudget(): void {
-    this.budgetLabelEl.textContent = `${this.budgetLeft}/${this.budgetTotal}`;
-    this.budgetLabelEl.title = t('hud.editsTitle');
-    this.pipsEl.innerHTML = '';
-    for (let i = 0; i < this.budgetTotal; i += 1) {
-      const pip = document.createElement('span');
-      pip.className = i < this.budgetLeft ? 'pip on' : 'pip';
-      this.pipsEl.appendChild(pip);
+  private renderEdits(): void {
+    this.budgetLabelEl.innerHTML = '';
+    const editsWord = document.createElement('span');
+    editsWord.className = 'budget-word';
+    editsWord.textContent = t('hud.edits');
+    const used = document.createElement('b');
+    used.className = 'budget-used';
+    used.textContent = String(this.editsUsed);
+    const sep = document.createElement('span');
+    sep.className = 'budget-sep';
+    sep.textContent = '·';
+    const parWord = document.createElement('span');
+    parWord.className = 'budget-word';
+    parWord.textContent = t('hud.par');
+    const parValue = document.createElement('b');
+    parValue.className = 'budget-par';
+    parValue.textContent = String(this.par);
+    this.budgetLabelEl.append(editsWord, used, sep, parWord, parValue);
+    if (this.overPar) {
+      const over = document.createElement('span');
+      over.className = 'over-par-tag';
+      over.textContent = t('hud.overPar');
+      this.budgetLabelEl.appendChild(over);
     }
-    this.budgetLabelEl.classList.toggle('empty', this.budgetLeft <= 0);
+    this.root.dataset.overPar = this.overPar ? 'true' : 'false';
+    this.budgetEl.title = this.overPar ? t('hud.overPar') : t('hud.editsTitle');
+    this.budgetLabelEl.classList.toggle('over', this.overPar);
   }
 
   setMode(mode: EditOp): void {
@@ -336,6 +367,11 @@ export class Hud {
     const label = this.muted ? t('hud.unmute') : t('hud.mute');
     this.muteBtn.setAttribute('aria-label', label);
     this.muteBtn.title = label;
+  }
+
+  setHintAttention(on: boolean): void {
+    this.hintAttention = on;
+    this.hintBtn.classList.toggle('attention', on);
   }
 
   setLegendOpen(open: boolean): void {

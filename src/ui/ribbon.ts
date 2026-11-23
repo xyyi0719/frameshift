@@ -47,6 +47,17 @@ export interface RibbonCallbacks {
   onHoverPart: (partIndex: number | null) => void;
   /** Esc 等关闭上层浮层。 */
   onEscape: () => void;
+  /** 悬停 / 键盘光标预览；null = 关闭预览。 */
+  onPreview: (req: RibbonPreviewRequest | null) => void;
+  /** 从基因带拖起一个碱基（超过 6px 阈值后触发）。 */
+  onBaseDragStart: (index: number, base: Base, x: number, y: number) => void;
+  /** 触屏点缝隙：先预览、再点卡片落子。 */
+  onGapTap: (index: number) => void;
+}
+
+export interface RibbonPreviewRequest {
+  op: 'insert' | 'delete' | 'replace';
+  index: number;
 }
 
 interface BaseCell {
@@ -240,6 +251,15 @@ export class GeneRibbon {
   private reduced = prefersReducedMotion();
 
   private anim: ShiftAnim | null = null;
+  private hintRequest: EditRequest | null = null;
+  private previewKey = '';
+  private previewArmed = false;
+  private baseDragCandidate: number | null = null;
+  private baseDragActive = false;
+  private baseDragStart = { x: 0, y: 0 };
+  private dragBaseIndex: number | null = null;
+  private dropIndicator: { kind: 'insert' | 'move'; index: number; base?: Base } | null = null;
+  private externalDrag = false;
   private lastNow = 0;
   private disposed = false;
 
@@ -339,6 +359,8 @@ export class GeneRibbon {
     this.anim = null;
     this.cursor = 0;
     this.scrollX = 0;
+    this.clearHint();
+    this.clearPreview();
     this.scrollTarget = 0;
     this.hover = null;
     this.closePicker();
@@ -357,6 +379,8 @@ export class GeneRibbon {
     this.syncModeUi();
     this.callbacks.onModeChange(mode);
     this.ensureCursorVisible();
+    this.previewArmed = true;
+    this.previewFromCursor();
   }
 
   getMode(): EditOp {
@@ -366,7 +390,10 @@ export class GeneRibbon {
   /** 禁用/启用编辑（RUN 期间、通关后）。 */
   setLocked(locked: boolean): void {
     this.locked = locked;
-    if (locked) this.closePicker();
+    if (locked) {
+      this.closePicker();
+      this.clearPreview();
+    }
     this.canvas.classList.toggle('is-locked', locked);
     this.modeHintEl.classList.toggle('is-locked', locked);
   }
@@ -413,6 +440,8 @@ export class GeneRibbon {
     this.anim = null;
     this.cursor = this.clampCursor(this.cursor);
     this.scrollTarget = clamp(this.scrollTarget, 0, this.maxScroll());
+    this.clearHint();
+    this.clearPreview();
     this.syncStamp();
   }
 
@@ -495,6 +524,8 @@ export class GeneRibbon {
     this.hover = null;
     this.closePicker();
     this.ensureCursorVisible();
+    this.clearHint();
+    this.clearPreview();
   }
 
   /** 只刷新基因（例如没有 diff 的 undo 兜底）。 */
@@ -505,10 +536,279 @@ export class GeneRibbon {
     this.issue = gene.issue;
     this.syncStamp();
     this.cursor = this.clampCursor(this.cursor);
+    this.clearHint();
+    this.clearPreview();
   }
 
   setHoverPartHighlight(_index: number | null): void {
     // 舞台负责高亮；基因带保持纯读。
+  }
+
+  /** 提示：高亮一个具体编辑位置（不执行、不扣额度）。 */
+  showHint(req: EditRequest): void {
+    if (!this.level.ops.includes(req.op)) return;
+    this.hintRequest = req;
+    this.mode = req.op;
+    this.cursor = this.clampCursor(req.index);
+    this.previewArmed = true;
+    this.closePicker();
+    this.syncModeUi();
+    this.callbacks.onModeChange(req.op);
+    this.ensureCursorVisible();
+    this.clearPreview();
+  }
+
+  clearHint(): void {
+    this.hintRequest = null;
+  }
+
+  /** 画布上的起始密码子锚点（视口坐标，供贴画布引导使用）。 */
+  getStartAnchor(): { x: number; y: number; w: number; h: number } {
+    const rect = this.canvas.getBoundingClientRect();
+    const frame = this.layout.slots.find((f) => f.slot.role === 'start');
+    if (!frame) {
+      return { x: rect.left + 12, y: rect.top + RIBBON.baseY, w: this.metrics.baseW * 3, h: RIBBON.baseH };
+    }
+    const box = this.displayedBox(frame, (c) => c.x);
+    return {
+      x: rect.left + box.x - this.scrollX,
+      y: rect.top + RIBBON.baseY - 4,
+      w: box.w,
+      h: RIBBON.baseH + 12,
+    };
+  }
+
+  /** 某个插入缝隙的锚点（视口坐标）。 */
+  getGapAnchor(index: number): { x: number; y: number; w: number; h: number } {
+    const rect = this.canvas.getBoundingClientRect();
+    const gx = gapCenterX(this.layout, index, this.metrics);
+    return {
+      x: rect.left + gx - this.scrollX - this.metrics.baseW / 2,
+      y: rect.top + RIBBON.baseY - 4,
+      w: this.metrics.baseW,
+      h: RIBBON.baseH + 12,
+    };
+  }
+
+  setExternalDrag(active: boolean): void {
+    this.externalDrag = active;
+    if (active) this.clearPreview();
+  }
+
+  beginBaseDrag(index: number): void {
+    this.dragBaseIndex = index;
+    this.hover = null;
+    this.tipEl.hidden = true;
+    this.clearPreview();
+  }
+
+  endBaseDrag(): void {
+    this.dragBaseIndex = null;
+    this.dropIndicator = null;
+  }
+
+  setDropIndicator(indicator: { kind: 'insert' | 'move'; index: number; base?: Base } | null): void {
+    this.dropIndicator = indicator;
+  }
+
+  getBaseAt(index: number): Base | null {
+    return this.gene.bases[index] ?? null;
+  }
+
+  getRibbonRect(): DOMRect {
+    return this.canvas.getBoundingClientRect();
+  }
+
+  /** 拖拽时找最近的缝隙（视口坐标）；不在基因带内返回 null。 */
+  hitGapAt(clientX: number, clientY: number): number | null {
+    const rect = this.canvas.getBoundingClientRect();
+    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+      return null;
+    }
+    const sx = clientX - rect.left;
+    const sy = clientY - rect.top;
+    if (sy < 24 || sy > RIBBON.baseY + RIBBON.baseH + 62) return null;
+    const contentX = sx + this.scrollX;
+    let best: number | null = null;
+    let bestD = 1e9;
+    for (let i = 0; i <= this.gene.seq.length; i += 1) {
+      const gx = gapCenterX(this.layout, i, this.metrics);
+      const d = Math.abs(contentX - gx);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    return bestD <= 34 ? best : null;
+  }
+
+  /** 指针下的碱基（与当前模式无关）。 */
+  baseAtPoint(clientX: number, clientY: number): number | null {
+    const rect = this.canvas.getBoundingClientRect();
+    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) return null;
+    const sx = clientX - rect.left;
+    const sy = clientY - rect.top;
+    if (sy < RIBBON.baseY - 4 || sy > RIBBON.baseY + RIBBON.baseH + 6) return null;
+    const contentX = sx + this.scrollX;
+    for (const cell of this.layout.cells) {
+      if (contentX >= cell.x - 2 && contentX <= cell.x + this.metrics.baseW + 2) return cell.index;
+    }
+    return null;
+  }
+
+  private drawDropGhost(ctx: CanvasRenderingContext2D, now: number): void {
+    const drop = this.dropIndicator;
+    if (!drop) return;
+    const cells = this.layout.cells;
+    let x: number;
+    if (drop.index < cells.length) {
+      x = cells[drop.index].x;
+    } else if (cells.length > 0) {
+      x = cells[cells.length - 1].x + this.metrics.baseW + this.metrics.baseGap;
+    } else {
+      x = this.metrics.padX;
+    }
+    const y = RIBBON.baseY;
+    const pulse = 0.55 + Math.sin(now / 220) * 0.18;
+    ctx.save();
+    ctx.globalAlpha = pulse;
+    ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = drop.base ? BASE_COLORS[drop.base] : COLORS.accent;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    this.roundRect(ctx, x, y, this.metrics.baseW, RIBBON.baseH, 6);
+    ctx.fillStyle = drop.base ? withAlphaSafe(BASE_COLORS[drop.base], 0.14) : 'rgba(95,227,200,0.1)';
+    ctx.fill();
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (drop.base) {
+      ctx.fillStyle = BASE_COLORS[drop.base];
+      ctx.font = `700 18px ${FONT_MONO}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(drop.base, x + this.metrics.baseW / 2, y + RIBBON.baseH / 2 + 1);
+    }
+    ctx.restore();
+  }
+
+  private commitPreview(req: RibbonPreviewRequest | null): void {
+    const key = req ? `${req.op}:${req.index}` : '';
+    if (key === this.previewKey) return;
+    this.previewKey = key;
+    this.callbacks.onPreview(req);
+  }
+
+  private clearPreview(resetArmed = true): void {
+    if (resetArmed) this.previewArmed = false;
+    this.commitPreview(null);
+  }
+
+  private previewFromHover(): void {
+    if (this.externalDrag) {
+      this.commitPreview(null);
+      return;
+    }
+    if (this.locked || !this.hover) {
+      this.commitPreview(null);
+      return;
+    }
+    if (this.mode === 'insert' && this.hover.kind === 'gap') {
+      this.previewArmed = true;
+      this.commitPreview({ op: 'insert', index: this.hover.index });
+      return;
+    }
+    if ((this.mode === 'delete' || this.mode === 'replace') && this.hover.kind === 'base') {
+      this.previewArmed = true;
+      this.commitPreview({ op: this.mode, index: this.hover.index });
+      return;
+    }
+    this.commitPreview(null);
+  }
+
+  private previewFromCursor(): void {
+    if (this.externalDrag) {
+      this.commitPreview(null);
+      return;
+    }
+    if (this.locked || !this.previewArmed) {
+      this.commitPreview(null);
+      return;
+    }
+    const n = this.gene.seq.length;
+    if (this.mode === 'insert') {
+      this.commitPreview({ op: 'insert', index: this.clampCursor(this.cursor) });
+    } else if (n > 0) {
+      this.commitPreview({ op: this.mode, index: this.clampCursor(this.cursor) });
+    } else {
+      this.commitPreview(null);
+    }
+  }
+
+  /** 金色脉冲圈 + 指向箭头。 */
+  private drawHint(ctx: CanvasRenderingContext2D, now: number): void {
+    const req = this.hintRequest;
+    if (!req) return;
+    const n = this.gene.seq.length;
+    if (req.index < 0 || (req.op === 'insert' ? req.index > n : req.index >= n)) return;
+    let x: number;
+    let w: number;
+    if (req.op === 'insert') {
+      x = gapCenterX(this.layout, req.index, this.metrics) - this.metrics.gapW / 2;
+      w = Math.max(this.metrics.baseW, this.metrics.gapW + 10);
+    } else {
+      const cell = this.layout.cells[req.index];
+      if (!cell) return;
+      x = cell.x;
+      w = this.metrics.baseW;
+    }
+    const cy = RIBBON.baseY + RIBBON.baseH / 2;
+    const pulse = 0.62 + Math.sin(now / 280) * 0.26;
+    const ringW = w + 12 + pulse * 4;
+    const ringH = RIBBON.baseH + 12 + pulse * 4;
+    ctx.save();
+    ctx.globalAlpha = pulse;
+    ctx.strokeStyle = COLORS.amber;
+    ctx.lineWidth = 2;
+    ctx.shadowColor = COLORS.amber;
+    ctx.shadowBlur = 13;
+    ctx.beginPath();
+    ctx.ellipse(x + w / 2, cy, ringW / 2, ringH / 2, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // 指向箭头（限制在画布顶部以内）
+    const ax = x + w / 2;
+    const badgeY = 12;
+    ctx.globalAlpha = 0.9;
+    ctx.strokeStyle = COLORS.amber;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(ax, badgeY + 11);
+    ctx.lineTo(ax, RIBBON.baseY - 12);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(ax, RIBBON.baseY - 6);
+    ctx.lineTo(ax - 5, RIBBON.baseY - 15);
+    ctx.lineTo(ax + 5, RIBBON.baseY - 15);
+    ctx.closePath();
+    ctx.fillStyle = COLORS.amber;
+    ctx.fill();
+
+    // 箭头顶部的碱基/操作徽章
+    const badge = req.op === 'delete' ? '−' : req.base ?? '±';
+    ctx.beginPath();
+    ctx.arc(ax, badgeY, 10, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(8, 15, 21, 0.96)';
+    ctx.fill();
+    ctx.strokeStyle = COLORS.amber;
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+    ctx.fillStyle = req.base ? BASE_COLORS[req.base] : COLORS.amber;
+    ctx.font = `700 13px ${FONT_MONO}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(badge, ax, badgeY + 1);
+    ctx.restore();
   }
 
   /* ------------------------------ 渲染 ------------------------------ */
@@ -539,9 +839,12 @@ export class GeneRibbon {
     ctx.save();
     ctx.translate(-this.scrollX, 0);
 
+    const drop = this.dropIndicator;
     const xOf = (cell: BaseCell): number => {
-      if (!anim) return cell.x;
-      return (anim.fromX[cell.index] ?? cell.x) + (cell.x - (anim.fromX[cell.index] ?? cell.x)) * eased;
+      let x = cell.x;
+      if (anim) x = (anim.fromX[cell.index] ?? cell.x) + (cell.x - (anim.fromX[cell.index] ?? cell.x)) * eased;
+      if (drop && cell.index >= drop.index) x += this.metrics.baseW + this.metrics.baseGap;
+      return x;
     };
 
     this.drawRuler(ctx, frameLayout, xOf, anim, now);
@@ -551,6 +854,8 @@ export class GeneRibbon {
     this.drawConnectors(ctx, frameLayout, xOf, anim, now);
     this.drawParts(ctx, frameLayout, xOf, anim, now);
     this.drawCursor(ctx, frameLayout, xOf, now);
+    this.drawHint(ctx, now);
+    this.drawDropGhost(ctx, now);
     if (anim) this.drawScan(ctx, anim, now);
 
     ctx.restore();
@@ -754,6 +1059,18 @@ export class GeneRibbon {
     for (const cell of layout.cells) {
       const x = xOf(cell);
       if (x + this.metrics.baseW < this.scrollX - 40 || x > this.scrollX + this.viewW + 40) continue;
+      if (this.dragBaseIndex === cell.index) {
+        ctx.save();
+        ctx.globalAlpha = 0.55;
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = COLORS.amber;
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        this.roundRect(ctx, x + 1, RIBBON.baseY + 1, this.metrics.baseW - 2, RIBBON.baseH - 2, 5);
+        ctx.stroke();
+        ctx.restore();
+        continue;
+      }
       const isNew = anim?.newBaseIndex === cell.index;
       const appearT = isNew && anim ? progress(now, anim.start, 130) : 1;
       const scale = isNew ? 0.4 + 0.6 * easeOutCubic(appearT) : 1;
@@ -1170,7 +1487,7 @@ export class GeneRibbon {
     if (max <= 0) return;
     const trackW = Math.min(220, w * 0.4);
     const tx = w - trackW - 14;
-    const ty = h - 5;
+    const ty = h - 34;
     const frac = this.viewW / this.layout.contentWidth;
     const thumbW = Math.max(28, trackW * frac);
     const thumbX = tx + (trackW - thumbW) * (this.scrollX / max);
@@ -1199,6 +1516,7 @@ export class GeneRibbon {
     this.metrics = this.computeMetrics();
     this.layout = buildLayout(this.gene, this.metrics);
     this.anim = null;
+    this.clearPreview();
     this.scrollTarget = clamp(this.scrollTarget, 0, this.maxScroll());
     this.scrollX = clamp(this.scrollX, 0, this.maxScroll());
   }
@@ -1256,6 +1574,20 @@ export class GeneRibbon {
   private handlePointerMove(e: PointerEvent): void {
     const pt = this.localPoint(e);
     this.pointer = pt;
+    if (this.baseDragCandidate !== null) {
+      if (!this.baseDragActive) {
+        const dx = e.clientX - this.baseDragStart.x;
+        const dy = e.clientY - this.baseDragStart.y;
+        if (Math.hypot(dx, dy) >= 6) {
+          this.baseDragActive = true;
+          this.dragging = false;
+          this.beginBaseDrag(this.baseDragCandidate);
+          const base = this.getBaseAt(this.baseDragCandidate);
+          if (base) this.callbacks.onBaseDragStart(this.baseDragCandidate, base, e.clientX, e.clientY);
+        }
+      }
+      return;
+    }
     if (this.dragging) {
       const dx = e.clientX - this.dragStartX;
       if (Math.abs(dx) > 4) this.dragMoved = true;
@@ -1270,24 +1602,41 @@ export class GeneRibbon {
 
   private handlePointerLeave(): void {
     this.pointer = null;
-    this.hover = null;
+    if (this.baseDragCandidate === null) this.hover = null;
     this.tipEl.hidden = true;
     this.callbacks.onHoverPart(null);
+    if (!this.baseDragActive) this.clearPreview();
   }
 
   private handlePointerDown(e: PointerEvent): void {
     if (e.button !== 0) return;
     const pt = this.localPoint(e);
-    this.dragging = true;
-    this.dragMoved = false;
-    this.dragStartX = e.clientX;
-    this.dragStartScroll = this.scrollX;
-    this.canvas.setPointerCapture(e.pointerId);
     this.updateHover(pt.x, pt.y);
+    const baseIndex = this.locked ? null : this.baseAtPoint(e.clientX, e.clientY);
+    if (baseIndex !== null) {
+      this.baseDragCandidate = baseIndex;
+      this.baseDragActive = false;
+      this.baseDragStart = { x: e.clientX, y: e.clientY };
+      this.dragging = false;
+    } else {
+      this.dragging = true;
+      this.dragMoved = false;
+      this.dragStartX = e.clientX;
+      this.dragStartScroll = this.scrollX;
+    }
+    this.canvas.setPointerCapture(e.pointerId);
     this.canvas.focus({ preventScroll: true });
   }
 
   private handlePointerUp(e: PointerEvent): void {
+    if (this.baseDragCandidate !== null) {
+      const active = this.baseDragActive;
+      this.baseDragCandidate = null;
+      this.baseDragActive = false;
+      this.dragging = false;
+      this.canvas.style.cursor = '';
+      if (active) return; // App 的 window pointerup 负责落点
+    }
     const wasDragging = this.dragging;
     this.dragging = false;
     this.canvas.style.cursor = '';
@@ -1322,9 +1671,11 @@ export class GeneRibbon {
             const idx = contentX < mid ? cell.index : cell.index + 1;
             this.hover = { kind: 'gap', index: idx };
             this.canvas.style.cursor = 'copy';
+            this.previewFromHover();
           } else {
             this.hover = { kind: 'base', index: cell.index };
             this.canvas.style.cursor = this.locked ? 'not-allowed' : 'pointer';
+            this.previewFromHover();
           }
           return;
         }
@@ -1334,6 +1685,7 @@ export class GeneRibbon {
       if (gap !== null) {
         this.hover = { kind: 'gap', index: gap };
         this.canvas.style.cursor = 'copy';
+        this.previewFromHover();
         return;
       }
     }
@@ -1343,12 +1695,14 @@ export class GeneRibbon {
     if (slotIdx !== null) {
       this.hover = { kind: 'slot', slotIndex: slotIdx };
       this.canvas.style.cursor = 'help';
+      this.previewFromHover();
       const part = this.afterPartForSlot(this.layout.slots[slotIdx].slot, this.gene);
       this.callbacks.onHoverPart(part ? part.index : null);
     } else {
       this.hover = null;
       this.callbacks.onHoverPart(null);
       this.canvas.style.cursor = '';
+      this.previewFromHover();
     }
   }
 
@@ -1390,7 +1744,10 @@ export class GeneRibbon {
     if (this.mode === 'insert') {
       if (hover.kind === 'gap') {
         this.cursor = hover.index;
-        this.openPicker('insert', hover.index);
+        const coarse = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+          && window.matchMedia('(pointer: coarse)').matches;
+        if (coarse || this.viewW < 720) this.callbacks.onGapTap(hover.index);
+        else this.openPicker('insert', hover.index);
       } else if (hover.kind === 'base') {
         this.cursor = hover.index;
         this.ensureCursorVisible();
@@ -1639,21 +1996,29 @@ export class GeneRibbon {
         e.preventDefault();
         this.cursor = this.clampCursor(this.cursor - 1);
         this.ensureCursorVisible();
+        this.previewArmed = true;
+        this.previewFromCursor();
         return;
       case 'ArrowRight':
         e.preventDefault();
         this.cursor = this.clampCursor(this.cursor + 1);
         this.ensureCursorVisible();
+        this.previewArmed = true;
+        this.previewFromCursor();
         return;
       case 'Home':
         e.preventDefault();
         this.cursor = 0;
         this.ensureCursorVisible();
+        this.previewArmed = true;
+        this.previewFromCursor();
         return;
       case 'End':
         e.preventDefault();
         this.cursor = this.clampCursor(this.mode === 'insert' ? this.gene.seq.length : this.gene.seq.length - 1);
         this.ensureCursorVisible();
+        this.previewArmed = true;
+        this.previewFromCursor();
         return;
       case 'Enter':
         e.preventDefault();

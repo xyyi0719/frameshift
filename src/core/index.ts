@@ -14,5 +14,6 @@ export * from './edit';
 export * from './diff';
 export * from './judge';
 export * from './session';
+export * from './hint';
 
 export { PART_DEFS, PART_BY_ID } from '../data/parts';

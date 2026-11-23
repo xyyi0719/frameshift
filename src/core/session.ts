@@ -1,10 +1,13 @@
 /**
  * 会话状态机（A 负责）。
  * ---------------------------------------------------------------
- * 全局唯一可变状态：当前序列、编辑历史、额度、监听器。
- * 约定（docs/SPEC.md 2.4 / 6.2）：
- *  - 编辑失败不抛异常，返回 { ok:false, reason }。
- *  - undo 免费且不限次数；额度 = history.length，撤销自然退还。
+ * 全局唯一可变状态：当前序列、编辑历史、监听器。
+ * 约定（docs/SPEC.md 2.4 / 6.2，已按线上反馈改为 PAR 语义）：
+ *  - level.budget 是「标准杆」，不是硬上限：编辑永远不因额度被拒绝，
+ *    budgetUsed 可以超过 level.budget；UI 用 overBudget / par 做展示。
+ *  - 编辑失败不抛异常，返回 { ok:false, reason }；运行期不再产生 'no_budget'
+ *    （类型里保留该错误码只是为了兼容冻结的 types.ts）。
+ *  - undo 免费且不限次数；budgetUsed = history.length，撤销自然退还。
  *  - 事件在状态更新之后同步派发；派发期间再次调用 Session 方法是被禁止的
  *    （B 不要这么干，这里也不为它做队列）。
  *  - 每次 emit 携带的都是新生成的不可变快照对象（Gene/Phenotype/Edit）。
@@ -72,13 +75,26 @@ export class Session {
     return this.currentPhenotype;
   }
 
-  /** 剩余额度 = level.budget - budgetUsed。 */
+  /**
+   * 相对标准杆的余量 = level.budget - budgetUsed。
+   * PAR 语义下它不是「还允许几刀」，可以是负数（说明已经超杆）。
+   */
   get budgetLeft(): number {
     return this.level.budget - this.edits.length;
   }
 
   get budgetUsed(): number {
     return this.edits.length;
+  }
+
+  /** 本局标准杆（= level.budget）。给 HUD 的 "3 edits · par 1" 用。 */
+  get par(): number {
+    return this.level.budget;
+  }
+
+  /** 是否已经超过标准杆（budgetUsed > level.budget）。正好等于 par 时是 false。 */
+  get overBudget(): boolean {
+    return this.budgetUsed > this.level.budget;
   }
 
   /** 撤销栈非空。 */
@@ -93,15 +109,13 @@ export class Session {
 
   /**
    * 试探：不会改变状态。返回 null 表示可以执行，否则返回拒绝原因。
-   * 顺序固定：locked_op → no_budget → index_out_of_range
-   *          → invalid_base → no_change → too_long。
+   * 顺序固定：locked_op → index_out_of_range → invalid_base
+   *          → no_change → too_long。
+   * 额度不再是拒绝理由（PAR 只是展示用的标准杆）。
    */
   canEdit(req: EditRequest): EditRejection | null {
     if (!this.level.ops.includes(req.op)) {
       return 'locked_op';
-    }
-    if (this.budgetLeft <= 0) {
-      return 'no_budget';
     }
 
     const n = this.currentSeq.length;
@@ -130,7 +144,7 @@ export class Session {
     return null;
   }
 
-  /** 执行编辑。永不抛异常。 */
+  /** 执行编辑。永不抛异常；额度耗尽后依然成功，budgetUsed 继续累加。 */
   edit(req: EditRequest): EditResult {
     const rejection = this.canEdit(req);
     if (rejection !== null) {

@@ -94,7 +94,7 @@ export function drawPart(
       drawCrest(ctx, color);
       break;
     case 'wing':
-      drawWing(ctx, color);
+      drawWingGlyph(ctx, color);
       break;
     case 'glow':
       drawGlow(ctx, color, phase);
@@ -347,7 +347,7 @@ function drawCrest(ctx: CanvasRenderingContext2D, color: string): void {
   ctx.stroke();
 }
 
-function drawWing(ctx: CanvasRenderingContext2D, color: string): void {
+function drawWingGlyph(ctx: CanvasRenderingContext2D, color: string): void {
   ctx.beginPath();
   ctx.moveTo(-5, 5);
   ctx.bezierCurveTo(-10, -4, 1, -13, 12, -10);
@@ -449,3 +449,199 @@ function drawGill(ctx: CanvasRenderingContext2D, color: string): void {
   ctx.strokeStyle = withAlpha(color, 0.28);
   ctx.stroke();
 }
+
+
+/* ==========================================================================
+ * 关节肢体 / 翅膀（供 creature.ts 的 IK 与扇动使用）
+ * ========================================================================== */
+
+export interface Point2 {
+  x: number;
+  y: number;
+}
+
+/** 用 IK 解出的髋/膝/脚画一条两段小腿（+脚掌/爪/鳍蹼）。 */
+export function drawLimb(
+  ctx: CanvasRenderingContext2D,
+  kind: 'leg' | 'longleg' | 'claw' | 'fin',
+  family: Family,
+  U: number,
+  hip: Point2,
+  knee: Point2,
+  foot: Point2,
+  footRot: number,
+  lod: 0 | 1 | 2,
+  highlight = 0,
+): void {
+  const fill = FAMILY_FILL[family];
+  const line = FAMILY_COLORS[family];
+  const hl = FAMILY_HL[family];
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  if (highlight > 0.01) {
+    ctx.shadowColor = line;
+    ctx.shadowBlur = 14 * highlight;
+  }
+
+  if (lod === 0) {
+    ctx.strokeStyle = fill;
+    ctx.lineWidth = 4.4 * U;
+    ctx.beginPath();
+    ctx.moveTo(hip.x, hip.y);
+    ctx.lineTo(knee.x, knee.y);
+    ctx.lineTo(foot.x, foot.y);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  ctx.strokeStyle = fill;
+  ctx.lineWidth = 4.4 * U;
+  ctx.beginPath();
+  ctx.moveTo(hip.x, hip.y);
+  ctx.lineTo(knee.x, knee.y);
+  ctx.stroke();
+  ctx.lineWidth = 3.2 * U;
+  ctx.beginPath();
+  ctx.moveTo(knee.x, knee.y);
+  ctx.lineTo(foot.x, foot.y);
+  ctx.stroke();
+
+  if (lod === 2) {
+    ctx.strokeStyle = withAlpha(hl, 0.35);
+    ctx.lineWidth = 1 * U;
+    ctx.beginPath();
+    ctx.moveTo(hip.x + (knee.x - hip.x) * 0.15 - 1 * U, hip.y + (knee.y - hip.y) * 0.15 - 1 * U);
+    ctx.lineTo(hip.x + (knee.x - hip.x) * 0.6 - 1 * U, hip.y + (knee.y - hip.y) * 0.6 - 1 * U);
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = line;
+  ctx.lineWidth = 1.2 * U;
+  ctx.beginPath();
+  ctx.arc(hip.x, hip.y, 3.2 * U, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#0f2321';
+  ctx.beginPath();
+  ctx.arc(knee.x, knee.y, 2.8 * U, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.save();
+  ctx.translate(foot.x, foot.y);
+  ctx.rotate(footRot);
+  ctx.fillStyle = withAlpha(line, 0.22);
+  ctx.strokeStyle = line;
+  ctx.lineWidth = 1.2 * U;
+  if (kind === 'claw') {
+    for (let i = -1; i <= 1; i += 1) {
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(i * 4 * U, 6 * U);
+      ctx.lineTo((i + 0.4) * 4 * U, 2 * U);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  } else if (kind === 'fin') {
+    ctx.beginPath();
+    ctx.ellipse(2 * U, 0, 8 * U, 4 * U, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    if (lod === 2) {
+      ctx.strokeStyle = withAlpha(line, 0.3);
+      ctx.lineWidth = 0.8 * U;
+      for (let i = 0; i < 3; i += 1) {
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(2 * U + i * 2.5 * U, (i - 1) * 2.4 * U);
+        ctx.stroke();
+      }
+    }
+  } else {
+    const rw = kind === 'longleg' ? 9 * U : 8 * U;
+    ctx.beginPath();
+    ctx.ellipse(1.5 * U, 1.3 * U, rw / 2, 2.2 * U, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.restore();
+}
+
+/** 三片翼膜 + 前缘骨，调用前把 ctx 移到肩部并做扇动旋转。 */
+export function drawWing(
+  ctx: CanvasRenderingContext2D,
+  U: number,
+  flap: number,
+  lag: number,
+  lod: 0 | 1 | 2,
+  alpha = 1,
+): void {
+  ctx.save();
+  ctx.rotate(flap);
+  ctx.scale(1, 0.94 + 0.06 * Math.abs(Math.cos(flap)));
+  ctx.globalAlpha *= alpha;
+  const wx = 3 * U;
+  const wy = -34 * U;
+  const tips: [number, number][] = [
+    [-16 * U + lag, -27 * U],
+    [-30 * U, -7 * U],
+    [-13 * U, -2 * U],
+  ];
+
+  for (let i = 0; i < 3; i += 1) {
+    const tip = tips[i];
+    const prev = i === 0 ? ([0, 0] as [number, number]) : tips[i - 1];
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(wx, wy);
+    ctx.quadraticCurveTo((wx + tip[0]) / 2 + 4 * U, (wy + tip[1]) / 2 - 2 * U, tip[0], tip[1]);
+    ctx.quadraticCurveTo((tip[0] + prev[0]) / 2 - 2 * U, (tip[1] + prev[1]) / 2 + 2 * U, prev[0], prev[1]);
+    ctx.closePath();
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(165,139,240,0.25)' : 'rgba(165,139,240,0.16)';
+    ctx.fill();
+    if (lod > 0) {
+      ctx.strokeStyle = 'rgba(214,200,255,0.38)';
+      ctx.lineWidth = 0.9 * U;
+      ctx.stroke();
+    }
+  }
+
+  ctx.strokeStyle = FAMILY_COLORS.G;
+  ctx.lineWidth = 2.8 * U;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(wx, wy);
+  ctx.stroke();
+  ctx.fillStyle = FAMILY_COLORS.G;
+  ctx.beginPath();
+  ctx.arc(wx, wy, 2.4 * U, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = 'rgba(214,200,255,0.5)';
+  ctx.lineWidth = 0.9 * U;
+  for (const tip of tips) {
+    ctx.beginPath();
+    ctx.moveTo(wx, wy);
+    ctx.lineTo(tip[0] * 0.96, tip[1] * 0.96);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+const FAMILY_FILL: Readonly<Record<Family, string>> = {
+  A: '#3d3120',
+  U: '#16302e',
+  G: '#2b2440',
+  C: '#3a2430',
+};
+const FAMILY_HL: Readonly<Record<Family, string>> = {
+  A: '#ffe0a3',
+  U: '#9df0e0',
+  G: '#d6c8ff',
+  C: '#ffb8c8',
+};

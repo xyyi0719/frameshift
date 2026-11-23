@@ -6,7 +6,7 @@
  * UI 读取时统一通过 levelText / partLabel / gateText 等 helper 查表。
  */
 
-import type { Family, Gate, Level, PartId, StatKey } from '../core';
+import type { Base, Codon, Family, Gate, Level, PartId, StatKey } from '../core';
 
 export type Lang = 'en' | 'zh';
 
@@ -35,8 +35,10 @@ export const en = {
   'common.noBonus': 'NO BONUS',
 
   /* HUD */
-  'hud.target': 'TARGET',
+  'hud.target': 'GOAL',
   'hud.edits': 'EDITS',
+  'hud.par': 'PAR',
+  'hud.overPar': 'OVER PAR',
   'hud.editsTitle': 'Edits left',
   'hud.undoTitle': 'Undo (Ctrl+Z)',
   'hud.resetTitle': 'Reset this specimen',
@@ -55,7 +57,17 @@ export const en = {
   'hud.legendToggle': 'Toggle codon table',
   'hud.legendAria': 'Toggle codon table',
   'hud.help': 'How to play',
+  'hud.hint': 'HINT',
+  'hud.hintTitle': 'Show a hint',
+  'hud.modeLockedLater': 'Unlocks later',
+  'hud.budgetEmpty': 'NO EDITS',
   'hud.specimen': 'SPECIMEN {n}',
+
+  /* 拖拽托盘 */
+  'tray.aria': 'Drag a base into the gene ribbon',
+  'tray.label': 'DRAG',
+  'tray.baseAria': 'Drag base {base}',
+  'drag.trash': 'DROP TO DELETE',
 
   /* 九项属性 */
   'stat.stride': 'STRIDE',
@@ -160,6 +172,7 @@ export const en = {
   'level.l01.intro':
     'Specimen 011. It breathes through seven gills and owns no legs at all. The crack ahead is four metres of dry rock.',
   'level.l01.hint': 'One base is missing. The reading frame is off by one — slide it back.',
+  'level.l01.objective': 'Insert one base so it can walk.',
   'level.l02.name': 'The Long Way Down',
   'level.l02.species': 'Bramble Fin',
   'level.l02.target':
@@ -167,6 +180,7 @@ export const en = {
   'level.l02.intro':
     'Specimen 027. Armoured, spined, finned — and far too heavy to fly. The ravine does not care how well you swim.',
   'level.l02.hint': 'You cannot add your way out of this one. Remove a single base and read again.',
+  'level.l02.objective': 'Delete one base so it can fly.',
 
   /* 闸门 */
   'gate.crack.label': 'The Crack',
@@ -216,6 +230,7 @@ export const en = {
   'toast.tooLong': 'SEQUENCE FULL — {n} BASES MAX',
   'toast.noChange': 'SAME BASE — NOTHING CHANGED',
   'toast.editRejected': 'EDIT REJECTED',
+  'toast.moved': 'MOVE · 2 EDITS',
   'toast.level': 'L{n} — {name}',
   'debug.level': 'level',
   'debug.history': 'history',
@@ -228,12 +243,74 @@ export const en = {
   'result.kicker': 'SPECIMEN LOGGED',
   'result.dialogAria': 'Specimen logged',
   'result.levelLine': 'L{n} · {name}',
-  'result.edits': '{used} / {par} EDITS',
+  'result.edits': '{used} edits · par {par}',
+  'result.overPar': 'solved in {used} edits — par is {par}',
+  'result.parStamp': 'PAR',
   'result.statChip': '{value} {stat}',
   'result.chainStop': 'STOP {codon}',
   'result.next': 'NEXT · {name}',
   'result.allLogged': 'Every specimen in this build is logged.',
   'result.reset': 'RESET',
+
+  /* 需求说明 / 目标图标 */
+  'goal.explain.stride': 'Each Leg adds 2 stride.',
+  'goal.explain.flight': 'Each Wing adds 2 flight.',
+  'goal.explain.swim': 'Each Fin adds 2 swim.',
+  'goal.explain.armor': 'Each Shell adds 2 armor.',
+  'goal.explain.spikes': 'Each Spike adds 2 spikes.',
+  'goal.explain.glow': 'Each Glow Organ adds 2 glow.',
+  'goal.explain.sight': 'Each Eye adds 2 sight.',
+  'goal.explain.grip': 'Each Claw adds 2 grip.',
+  'goal.explain.bite': 'Each Maw adds 2 bite.',
+
+  /* 悬停预览 */
+  'preview.aria': 'Edit preview',
+  'preview.titleInsert': 'PREVIEW · INSERT AT {n}',
+  'preview.titleDelete': 'PREVIEW · DELETE BASE {n}',
+  'preview.titleReplace': 'PREVIEW · REPLACE BASE {n}',
+  'preview.titleMove': 'PREVIEW · MOVE BASE {n}',
+  'preview.free': 'No edit spent.',
+  'preview.noBudget': 'No edits left — undo is free.',
+  'preview.pass': '{stat} {actual}/{min} ✓ can pass',
+  'preview.fail': '{stat} {actual}/{min} ✗ short by {short}',
+  'preview.invalidNoStart': 'NO START CODON',
+  'preview.invalidNoStop': 'NO STOP CODON',
+  'preview.invalidReading': 'UNREADABLE',
+  'preview.noOption': 'No legal edit here.',
+  'preview.noParts': 'NO BODY',
+
+  /* 提示按钮 / 高亮 */
+  'hint.insert': 'Try inserting {base} here.',
+  'hint.delete': 'Try deleting this base.',
+  'hint.replace': 'Try replacing this base with {base}.',
+  'hint.none': 'No hint available.',
+  'hint.button': 'HINT',
+
+  /* 失败讲人话 / 成功解释 */
+  'fail.stride': '{gills} gills, {legs} legs. Legs give stride: {actual} of the {need} you need.',
+  'fail.flight': '{plates} plates, {wings} wings. Wings give flight: {actual} of the {need} you need.',
+  'fail.generic': '{stat} {actual} of the {need} you need.',
+  'success.explain': '{stat} {actual} clears the {need} {gate} needs.',
+
+  /* 图例渐进披露 */
+  'legend.showAll': 'Show all 16',
+  'legend.showLess': 'Show fewer',
+  'legend.inspectHint': 'Tap a codon to see it on the creature.',
+  'legend.codonAria': 'Codon {codon}',
+  'legend.notOnCreature': '{part} is not on this creature.',
+
+  /* 贴着画布的三步引导 */
+  'coach.aria': 'How to play',
+  'coach.step': '{n} / 3',
+  'coach.skip': 'SKIP',
+  'coach.next': 'NEXT',
+  'coach.done': 'GOT IT',
+  'coach.step1.title': 'Reading starts here.',
+  'coach.step1.body': 'AUG is the start codon. Everything after it is read three bases at a time.',
+  'coach.step2.title': 'Insert one base here.',
+  'coach.step2.body': 'Hover the gap to preview each base. Nothing is spent until you confirm.',
+  'coach.step3.title': 'Watch stride, then run.',
+  'coach.step3.body': 'The gate needs stride. When the preview turns green, press RUN.',
 
   /* 新手引导 */
   'guide.dialogAria': 'How to play',
@@ -279,6 +356,8 @@ export const zh: Record<MessageKey, string> = {
 
   'hud.target': '目标',
   'hud.edits': '编辑',
+  'hud.par': '标准',
+  'hud.overPar': '超杆',
   'hud.editsTitle': '剩余编辑次数',
   'hud.undoTitle': '撤销（Ctrl+Z）',
   'hud.resetTitle': '重置本标本',
@@ -297,7 +376,16 @@ export const zh: Record<MessageKey, string> = {
   'hud.legendToggle': '显示或隐藏密码表',
   'hud.legendAria': '显示或隐藏密码表',
   'hud.help': '玩法说明',
+  'hud.hint': '提示',
+  'hud.hintTitle': '显示提示',
+  'hud.modeLockedLater': '稍后解锁',
+  'hud.budgetEmpty': '次数用尽',
   'hud.specimen': '标本 {n}',
+
+  'tray.aria': '把碱基拖进基因带',
+  'tray.label': '拖拽',
+  'tray.baseAria': '拖动碱基 {base}',
+  'drag.trash': '拖到这里删除',
 
   'stat.stride': '步幅',
   'stat.flight': '飞行',
@@ -397,12 +485,14 @@ export const zh: Record<MessageKey, string> = {
   'level.l01.intro':
     '标本 011。它用七条鳃呼吸，一条腿也没有。前方的裂缝是四米宽的干岩。',
   'level.l01.hint': '少了一个碱基。读框错开了一位——把它推回去。',
+  'level.l01.objective': '插入一个碱基，让它长出腿。',
   'level.l02.name': '漫长的下落',
   'level.l02.species': '荆棘鳍',
   'level.l02.target': '峡谷太宽，走不过去。六片甲壳的东西飞不起来。',
   'level.l02.intro':
     '标本 027。有甲、有刺、有鳍——但太重，飞不起来。峡谷不在乎你多会游泳。',
   'level.l02.hint': '这一关不能靠加碱基。删掉一个，再读一次。',
+  'level.l02.objective': '删掉一个碱基，让它飞起来。',
 
   'gate.crack.label': '裂缝',
   'gate.crack.hint': '四米宽。会游泳也没用。',
@@ -448,6 +538,7 @@ export const zh: Record<MessageKey, string> = {
   'toast.tooLong': '序列已满——最多 {n} 个碱基',
   'toast.noChange': '同一个碱基——没有变化',
   'toast.editRejected': '编辑被拒绝',
+  'toast.moved': '移动 · 2 次编辑',
   'toast.level': '第 {n} 关——{name}',
   'debug.level': '关卡',
   'debug.history': '历史',
@@ -459,12 +550,68 @@ export const zh: Record<MessageKey, string> = {
   'result.kicker': '标本已记录',
   'result.dialogAria': '标本已记录',
   'result.levelLine': 'L{n} · {name}',
-  'result.edits': '{used} / {par} 次编辑',
+  'result.edits': '{used} 次编辑 · 标准 {par}',
+  'result.overPar': '用了 {used} 次编辑——标准是 {par} 次',
+  'result.parStamp': '标准',
   'result.statChip': '{stat} {value}',
   'result.chainStop': '终止 {codon}',
   'result.next': '下一关 · {name}',
   'result.allLogged': '这个版本里的所有标本都已记录。',
   'result.reset': '重置',
+
+  'goal.explain.stride': '每条腿提供 2 点步幅。',
+  'goal.explain.flight': '每只翼提供 2 点飞行。',
+  'goal.explain.swim': '每片鳍提供 2 点游泳。',
+  'goal.explain.armor': '每片甲壳提供 2 点护甲。',
+  'goal.explain.spikes': '每根尖刺提供 2 点尖刺。',
+  'goal.explain.glow': '每个发光器提供 2 点发光。',
+  'goal.explain.sight': '每只眼睛提供 2 点感知。',
+  'goal.explain.grip': '每只爪提供 2 点抓握。',
+  'goal.explain.bite': '每个口器提供 2 点咬合。',
+
+  'preview.aria': '编辑预览',
+  'preview.titleInsert': '预览 · 在 {n} 处插入',
+  'preview.titleDelete': '预览 · 删除第 {n} 位',
+  'preview.titleReplace': '预览 · 替换第 {n} 位',
+  'preview.titleMove': '预览 · 移动第 {n} 位',
+  'preview.free': '不消耗编辑次数。',
+  'preview.noBudget': '没有编辑次数了——撤销是免费的。',
+  'preview.pass': '{stat} {actual}/{min} ✓ 能过',
+  'preview.fail': '{stat} {actual}/{min} ✗ 还差 {short}',
+  'preview.invalidNoStart': '没有起始密码子',
+  'preview.invalidNoStop': '没有终止密码子',
+  'preview.invalidReading': '无法读取',
+  'preview.noOption': '这里没有合法编辑。',
+  'preview.noParts': '没有身体',
+
+  'hint.insert': '试试在这里插入 {base}。',
+  'hint.delete': '试试删掉这个碱基。',
+  'hint.replace': '试试把这里换成 {base}。',
+  'hint.none': '暂时没有提示。',
+  'hint.button': '提示',
+
+  'fail.stride': '{gills} 条鳃、{legs} 条腿。腿提供步幅：{actual}，需要 {need}。',
+  'fail.flight': '{plates} 片甲、{wings} 只翼。翼提供飞行：{actual}，需要 {need}。',
+  'fail.generic': '{stat} {actual}，需要 {need}。',
+  'success.explain': '{stat} {actual}，达到「{gate}」所需的 {need}。',
+
+  'legend.showAll': '显示全部 16 个',
+  'legend.showLess': '收起',
+  'legend.inspectHint': '点一个密码子，在生物上查看它。',
+  'legend.codonAria': '密码子 {codon}',
+  'legend.notOnCreature': '这只生物没有{part}。',
+
+  'coach.aria': '玩法引导',
+  'coach.step': '{n} / 3',
+  'coach.skip': '跳过',
+  'coach.next': '下一步',
+  'coach.done': '知道了',
+  'coach.step1.title': '读框从这里开始。',
+  'coach.step1.body': 'AUG 是起始密码子。它之后的每三个碱基读成一个零件。',
+  'coach.step2.title': '在这里插入一个碱基。',
+  'coach.step2.body': '把鼠标停在缝隙上，就能预览四种碱基的结果；确认前不消耗次数。',
+  'coach.step3.title': '看步幅，再运行。',
+  'coach.step3.body': '闸门需要足够的步幅。预览变成绿色后，按运行。',
 
   'guide.dialogAria': '玩法说明',
   'guide.closeAria': '关闭引导',
@@ -555,13 +702,14 @@ export function t(key: MessageKey, params?: Readonly<Record<string, string | num
  * 数据对象 → 译文
  * ========================================================================== */
 
-const LEVEL_KEYS: Readonly<Record<string, { name: MessageKey; species: MessageKey; target: MessageKey; intro: MessageKey; hint: MessageKey }>> = {
+const LEVEL_KEYS: Readonly<Record<string, { name: MessageKey; species: MessageKey; target: MessageKey; intro: MessageKey; hint: MessageKey; objective: MessageKey }>> = {
   l01: {
     name: 'level.l01.name',
     species: 'level.l01.species',
     target: 'level.l01.target',
     intro: 'level.l01.intro',
     hint: 'level.l01.hint',
+    objective: 'level.l01.objective',
   },
   l02: {
     name: 'level.l02.name',
@@ -569,6 +717,7 @@ const LEVEL_KEYS: Readonly<Record<string, { name: MessageKey; species: MessageKe
     target: 'level.l02.target',
     intro: 'level.l02.intro',
     hint: 'level.l02.hint',
+    objective: 'level.l02.objective',
   },
 };
 
@@ -596,6 +745,24 @@ export function levelIntro(level: Level): string {
 export function levelHint(level: Level): string {
   const key = LEVEL_KEYS[level.id]?.hint;
   return key ? t(key) : level.hint;
+}
+
+export function levelObjective(level: Level): string {
+  const key = LEVEL_KEYS[level.id]?.objective;
+  return key ? t(key) : level.target;
+}
+
+/** 某个零件第一次出现在密码子里的碱基（用于「试试插这个」的文案）。 */
+export function hintInsertBase(codon: Codon): Base {
+  const first = codon.charAt(0);
+  const second = codon.charAt(1);
+  if (/^[AUGC]$/.test(first)) return first as Base;
+  if (/^[AUGC]$/.test(second)) return second as Base;
+  return 'U';
+}
+
+export function goalExplanation(stat: StatKey): string {
+  return t(`goal.explain.${stat}` as MessageKey);
 }
 
 export function gateLabel(gate: Gate): string {

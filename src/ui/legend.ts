@@ -24,20 +24,59 @@ export class Legend {
   private noResults!: HTMLElement;
   private stopSection!: HTMLElement;
   private currentGene: Gene | null = null;
+  private showAllBtn: HTMLButtonElement | null = null;
   private query = '';
+  private version = 0;
+  private autoExpanded = new Set<Family>();
+  private userExpanded = false;
+  private collapsedChips = new Map<string, HTMLElement>();
+  private onCodonPreview: (partId: PartId | null) => void = () => {};
 
-  constructor(root: HTMLElement) {
+  constructor(root: HTMLElement, onCodonPreview: (partId: PartId | null) => void = () => {}) {
     this.root = root;
+    this.onCodonPreview = onCodonPreview;
     this.build();
+  }
+
+  /** 设置某关默认展开的家族（渐进披露）。 */
+  setAutoExpand(families: readonly Family[]): void {
+    this.autoExpanded = new Set(families);
+    this.userExpanded = false;
+    for (const [family, section] of this.familySections) {
+      section.classList.toggle('collapsed', !this.isOpen(family));
+    }
+    this.renderShowAll();
+  }
+
+  private isOpen(family: Family): boolean {
+    if (this.userExpanded || this.query.trim() !== '') return true;
+    return this.autoExpanded.has(family);
+  }
+
+  private renderShowAll(): void {
+    if (!this.showAllBtn) return;
+    const allOpen =
+      this.userExpanded ||
+      [...this.familySections.keys()].every((f) => this.autoExpanded.has(f));
+    this.showAllBtn.hidden = allOpen;
+    this.showAllBtn.textContent = t('legend.showAll');
   }
 
   /** 语言切换后重建整栏；保留搜索词与当前基因高亮。 */
   refresh(): void {
     const query = this.searchInput?.value ?? this.query;
     const scrollTop = this.root.scrollTop;
+    const auto = new Set(this.autoExpanded);
+    const expanded = this.userExpanded;
     this.query = query;
     this.build();
     this.searchInput.value = query;
+    this.autoExpanded = auto;
+    this.userExpanded = expanded;
+    for (const [family, section] of this.familySections) {
+      section.classList.toggle('collapsed', !this.isOpen(family));
+    }
+    this.renderShowAll();
     this.applyFilter();
     if (this.currentGene) this.setGene(this.currentGene);
     this.root.scrollTop = scrollTop;
@@ -47,6 +86,8 @@ export class Legend {
     this.codonChips = new Map();
     this.partRows = new Map();
     this.familySections = new Map();
+    this.collapsedChips = new Map();
+    this.version += 1;
     this.root.innerHTML = '';
     this.root.setAttribute('aria-label', t('legend.title'));
 
@@ -80,6 +121,24 @@ export class Legend {
     });
     searchWrap.appendChild(this.searchInput);
     this.root.appendChild(searchWrap);
+
+    const inspect = document.createElement('p');
+    inspect.className = 'legend-inspect';
+    inspect.textContent = t('legend.inspectHint');
+    this.root.appendChild(inspect);
+
+    const showAll = document.createElement('button');
+    showAll.type = 'button';
+    showAll.className = 'legend-show-all';
+    showAll.textContent = t('legend.showAll');
+    showAll.addEventListener('click', () => {
+      this.userExpanded = true;
+      for (const section of this.familySections.values()) section.classList.remove('collapsed');
+      this.renderShowAll();
+      this.applyFilter();
+    });
+    this.showAllBtn = showAll;
+    this.root.appendChild(showAll);
 
     const body = document.createElement('div');
     body.className = 'legend-body';
@@ -225,14 +284,8 @@ export class Legend {
     codons.className = 'codon-row';
     const entries = codonEntriesFor(def.id);
     for (const entry of entries) {
-      const chip = document.createElement('span');
-      chip.className = 'codon-chip';
-      chip.textContent = entry.codon;
-      chip.dataset.codon = entry.codon;
+      const chip = this.makeChip(entry.codon, def.id, false);
       codons.appendChild(chip);
-      const list = this.codonChips.get(entry.codon) ?? [];
-      list.push(chip);
-      this.codonChips.set(entry.codon, list);
     }
     main.appendChild(codons);
 
@@ -251,9 +304,33 @@ export class Legend {
     return row;
   }
 
+  private makeChip(codon: string, partId: PartId | null, hiddenVariant: boolean): HTMLSpanElement {
+    const chip = document.createElement('span');
+    chip.className = hiddenVariant ? 'codon-chip more' : 'codon-chip';
+    if (!hiddenVariant) chip.textContent = codon;
+    chip.dataset.codon = codon;
+    if (hiddenVariant) chip.dataset.variant = String(this.version);
+    if (!hiddenVariant) {
+      chip.tabIndex = 0;
+      chip.setAttribute('role', 'button');
+      chip.setAttribute('aria-label', t('legend.codonAria', { codon }));
+      chip.addEventListener('mouseenter', () => this.onCodonPreview(partId));
+      chip.addEventListener('mouseleave', () => this.onCodonPreview(null));
+      chip.addEventListener('click', () => this.onCodonPreview(partId));
+    }
+    const list = this.codonChips.get(codon) ?? [];
+    list.push(chip);
+    this.codonChips.set(codon, list);
+    if (hiddenVariant) this.collapsedChips.set(chip.dataset.variant ?? codon, chip);
+    return chip;
+  }
+
   private applyFilter(): void {
     const q = this.query.trim().toLowerCase();
     let visible = 0;
+    for (const [family, section] of this.familySections) {
+      section.classList.toggle('collapsed', !this.isOpen(family));
+    }
     for (const row of this.partRows.values()) {
       const search = row.dataset.search ?? '';
       const show = q === '' || search.includes(q);
@@ -266,6 +343,7 @@ export class Legend {
     }
     this.stopSection.hidden = q !== '' && visible === 0;
     this.noResults.hidden = visible > 0 || q === '';
+    if (this.showAllBtn) this.showAllBtn.hidden = q !== '' || this.userExpanded;
   }
 
   /** 高亮当前序列里出现的密码子与当前生物的零件。 */
@@ -285,6 +363,8 @@ export class Legend {
     for (const [id, row] of this.partRows) {
       row.classList.toggle('present', activeParts.has(id));
     }
+
+    // 渐进披露只由关卡需求决定；当前生物只负责高亮。
   }
 
   clearSpecimens(): void {

@@ -14,6 +14,8 @@ import {
   PART_DEFS,
   applyEdit,
   codonToPart,
+  hintFor,
+  hintsFor,
   decode,
   diffGenes,
   judge,
@@ -633,19 +635,103 @@ describe('Session — 编辑语义（附录 B）', () => {
     expect(s.canEdit({ op: 'replace', index: 4, base: same })).toBe('no_change');
   });
 
-  it('额度用完后再 insert → no_budget；撤销后额度退还', () => {
-    const s = new Session(L1);
+  it('超过标准杆仍然可以编辑，budgetUsed 继续增长（不再有 no_budget）', () => {
+    const s = new Session(L1); // par = 2
+    expect(s.par).toBe(2);
+    expect(s.overBudget).toBe(false);
+
     expect(s.insert(3, 'U').ok).toBe(true);
     expect(s.budgetUsed).toBe(1);
     expect(s.insert(10, 'A').ok).toBe(true);
     expect(s.budgetUsed).toBe(2);
     expect(s.budgetLeft).toBe(0);
-    expect(s.insert(0, 'A')).toEqual({ ok: false, reason: 'no_budget' });
+    expect(s.overBudget).toBe(false); // 正好 = par 不算超
+
+    const over = s.insert(0, 'A');
+    expect(over.ok).toBe(true);
+    if (over.ok) expect(over.budgetUsed).toBe(3);
+    expect(s.budgetUsed).toBe(3);
+    expect(s.budgetLeft).toBe(-1);
+    expect(s.overBudget).toBe(true);
+    expect(s.canEdit({ op: 'insert', index: 0, base: 'A' })).toBeNull();
+
+    // 继续超杆也没问题，额度不是上限。
+    expect(s.insert(s.seq.length, 'A').ok).toBe(true);
+    expect(s.budgetUsed).toBe(4);
+    expect(s.overBudget).toBe(true);
+
+    // undo 不限次数、逐刀退还。
+    expect(s.undo()).toBe(true);
+    expect(s.budgetUsed).toBe(3);
+    expect(s.undo()).toBe(true);
+    expect(s.budgetUsed).toBe(2);
+    expect(s.overBudget).toBe(false);
+  });
+
+  it('超杆后 insert / remove / replace / edit 仍然全部可用', () => {
+    const level: Level = { ...L1, ops: ['insert', 'delete', 'replace'] };
+    const s = new Session(level); // par = 2
+
+    expect(s.insert(3, 'U').ok).toBe(true);
+    expect(s.remove(0).ok).toBe(true); // 第 2 刀：正好 = par
+    expect(s.budgetUsed).toBe(2);
+    expect(s.overBudget).toBe(false);
+
+    const index = 2;
+    const old = s.seq[index] as Base;
+    const base: Base = old === 'A' ? 'U' : 'A';
+    expect(s.replace(index, base).ok).toBe(true); // 第 3 刀：超杆
+    expect(s.budgetUsed).toBe(3);
+    expect(s.overBudget).toBe(true);
+
+    expect(s.remove(1).ok).toBe(true); // 第 4 刀：仍不被额度拒绝
+    expect(s.edit({ op: 'insert', index: 0, base: 'A' }).ok).toBe(true); // 第 5 刀
+    expect(s.budgetUsed).toBe(5);
+    expect(s.budgetLeft).toBe(-3);
+    expect(s.overBudget).toBe(true);
+  });
+
+  it('par / overBudget 边界：= par 不算超，+1 才算；undo 退回', () => {
+    const s = new Session(L2); // par = 1
+    expect(s.par).toBe(1);
+    expect(s.overBudget).toBe(false);
+
+    expect(s.remove(8).ok).toBe(true);
+    expect(s.budgetUsed).toBe(1);
+    expect(s.overBudget).toBe(false);
+
+    expect(s.insert(0, 'A').ok).toBe(true);
+    expect(s.budgetUsed).toBe(2);
+    expect(s.overBudget).toBe(true);
 
     expect(s.undo()).toBe(true);
     expect(s.budgetUsed).toBe(1);
-    expect(s.budgetLeft).toBe(1);
-    expect(s.insert(0, 'A').ok).toBe(true);
+    expect(s.overBudget).toBe(false);
+    expect(s.undo()).toBe(true);
+    expect(s.budgetUsed).toBe(0);
+    expect(s.overBudget).toBe(false);
+  });
+
+  it('undo 到底：budgetUsed 不会出现负数', () => {
+    const s = new Session(L1);
+    for (let i = 0; i < 5; i += 1) {
+      expect(s.insert(s.seq.length, 'A').ok).toBe(true);
+    }
+    expect(s.budgetUsed).toBe(5);
+    expect(s.overBudget).toBe(true);
+
+    let steps = 0;
+    while (s.undo()) {
+      steps += 1;
+      expect(s.budgetUsed).toBeGreaterThanOrEqual(0);
+      expect(s.budgetUsed).toBe(5 - steps);
+    }
+    expect(steps).toBe(5);
+    expect(s.budgetUsed).toBe(0);
+    expect(s.overBudget).toBe(false);
+    expect(s.seq).toBe(L1.sequence);
+    expect(s.undo()).toBe(false);
+    expect(s.budgetUsed).toBe(0);
   });
 
   it('undo 之后 budgetUsed 回 0、seq 回到初始', () => {
@@ -674,7 +760,7 @@ describe('Session — 编辑语义（附录 B）', () => {
     expect(s.remove(-1)).toEqual({ ok: false, reason: 'index_out_of_range' });
   });
 
-  it("解锁列表里没有 'replace' 的关卡调用 replace → locked_op（优先于 no_budget）", () => {
+  it("解锁列表里没有 'replace' 的关卡调用 replace → locked_op（与额度无关）", () => {
     const s = new Session(L1);
     const base = s.seq[6] as Base;
     expect(s.replace(6, base === 'A' ? 'U' : 'A')).toEqual({
@@ -683,7 +769,7 @@ describe('Session — 编辑语义（附录 B）', () => {
     });
     const lockedLevel: Level = { ...L1, budget: 0, ops: ['delete'] };
     const lockedS = new Session(lockedLevel);
-    // locked_op 必须优先于 no_budget。
+    // locked_op 与额度无关：budget = 0（par 0）也照样是 locked_op。
     expect(lockedS.insert(0, 'A')).toEqual({ ok: false, reason: 'locked_op' });
   });
 
@@ -716,7 +802,7 @@ describe('Session — 编辑语义（附录 B）', () => {
     });
   });
 
-  it('reset 回初始序列、清空 history、额度回满', () => {
+  it('reset 回初始序列、清空 history、budgetUsed 归零', () => {
     const s = new Session(L1);
     expect(s.insert(3, 'U').ok).toBe(true);
     expect(s.insert(10, 'A').ok).toBe(true);
@@ -730,16 +816,24 @@ describe('Session — 编辑语义（附录 B）', () => {
 });
 
 describe('Session — 边界', () => {
-  it('budget 为 0：任何编辑都 no_budget，但仍可 reset / undo=false', () => {
+  it('budget / par 为 0：编辑不被拒绝，第一次编辑就 overBudget', () => {
     const zero: Level = { ...L1, budget: 0 };
     const s = new Session(zero);
-    expect(s.canEdit({ op: 'insert', index: 0, base: 'A' })).toBe('no_budget');
-    expect(s.insert(0, 'A')).toEqual({ ok: false, reason: 'no_budget' });
-    expect(s.budgetLeft).toBe(0);
-    expect(s.undo()).toBe(false);
+    expect(s.par).toBe(0);
+    expect(s.overBudget).toBe(false);
+    expect(s.canEdit({ op: 'insert', index: 0, base: 'A' })).toBeNull();
+
+    const r = s.insert(0, 'A');
+    expect(r.ok).toBe(true);
+    expect(s.budgetUsed).toBe(1);
+    expect(s.budgetLeft).toBe(-1);
+    expect(s.overBudget).toBe(true);
+
     s.reset();
     expect(s.seq).toBe(L1.sequence);
-    expect(s.insert(0, 'A')).toEqual({ ok: false, reason: 'no_budget' });
+    expect(s.budgetUsed).toBe(0);
+    expect(s.overBudget).toBe(false);
+    expect(s.insert(0, 'A').ok).toBe(true);
   });
 
   it('非法碱基：返回 invalid_base，不改变状态', () => {
@@ -1101,5 +1195,107 @@ describe('decode 不变量', () => {
         }
       }
     }
+  });
+});
+
+/* ==========================================================================
+ * 12. 提示求解（hintFor / hintsFor）
+ * ========================================================================== */
+
+describe('hintFor / hintsFor', () => {
+  it('L1：返回一条可被 judge 判 pass 的插入提示', () => {
+    const hint = hintFor(L1, L1.sequence);
+    expect(hint).not.toBeNull();
+    expect(hint?.op).toBe('insert');
+
+    const next = applyEdit(L1.sequence, hint as EditRequest);
+    const g = decode(next);
+    const p = phenotype(g);
+    expect(g.issue).toBeNull();
+    expect(judge(L1, g, p).outcome).toBe('pass');
+
+    // 按约定枚举顺序（gap 升序、A<U<G<C）的第一个可行解。
+    expect(hint).toEqual({ op: 'insert', index: 2, base: 'G' });
+  });
+
+  it('L2：提示是删除类，DEL@7；hintsFor 给出 DEL@8 作为第二提示', () => {
+    const hint = hintFor(L2, L2.sequence);
+    expect(hint).toEqual({ op: 'delete', index: 7 });
+
+    const next = applyEdit(L2.sequence, hint as EditRequest);
+    const g = decode(next);
+    expect(judge(L2, g, phenotype(g)).outcome).toBe('pass');
+
+    expect(hintsFor(L2, L2.sequence, 5)).toEqual([
+      { op: 'delete', index: 7 },
+      { op: 'delete', index: 8 },
+    ]);
+  });
+
+  it('hintsFor 顺序稳定、结果全部可行，且从第一个 gap 起严格不降', () => {
+    const hints = hintsFor(L1, L1.sequence, 5);
+    expect(hints).toHaveLength(5);
+    expect(hints).toEqual([
+      { op: 'insert', index: 2, base: 'G' },
+      { op: 'insert', index: 3, base: 'A' },
+      { op: 'insert', index: 3, base: 'U' },
+      { op: 'insert', index: 3, base: 'G' },
+      { op: 'insert', index: 3, base: 'C' },
+    ]);
+
+    for (const request of hints) {
+      const g = decode(applyEdit(L1.sequence, request));
+      expect(judge(L1, g, phenotype(g)).outcome).toBe('pass');
+    }
+
+    const indices = hints.map((h) => h.index);
+    expect(indices).toEqual([...indices].sort((a, b) => a - b));
+    const basesAt3 = hints
+      .filter((h) => h.index === 3)
+      .map((h) => h.base);
+    expect(basesAt3).toEqual(['A', 'U', 'G', 'C']);
+  });
+
+  it('确定性：连续两次结果一致，大小写输入得到同一答案', () => {
+    expect(hintFor(L1, L1.sequence)).toEqual(hintFor(L1, L1.sequence));
+    expect(hintsFor(L1, L1.sequence, 4)).toEqual(hintsFor(L1, L1.sequence, 4));
+    expect(hintFor(L1, L1.sequence.toLowerCase())).toEqual(
+      hintFor(L1, L1.sequence),
+    );
+  });
+
+  it('无解 / 非法输入返回 null，绝不抛异常', () => {
+    const impossible: Level = {
+      ...L1,
+      gates: [
+        {
+          ...L1.gates[0],
+          requires: [{ stat: 'stride', min: 999 }],
+        },
+      ],
+    };
+    expect(hintFor(impossible, L1.sequence)).toBeNull();
+    expect(hintFor({ ...L1, budget: 0 }, L1.sequence)).toBeNull();
+    expect(hintFor(L1, '')).toBeNull();
+    expect(hintFor(L1, 'XYZ')).toBeNull();
+    expect(hintFor(L1, 'AUGCCC')).toBeNull(); // no_stop 也是非法基因
+    expect(hintFor(L1, 'CCC')).toBeNull(); // no_start
+
+    expect(() => hintFor(null as never, L1.sequence)).not.toThrow();
+    expect(hintFor(null as never, L1.sequence)).toBeNull();
+    expect(() =>
+      hintFor({ ...L1, gates: null as never }, L1.sequence),
+    ).not.toThrow();
+    expect(hintFor({ ...L1, gates: null as never }, L1.sequence)).toBeNull();
+    expect(() => hintFor(L1, undefined as never)).not.toThrow();
+    expect(hintFor(L1, undefined as never)).toBeNull();
+  });
+
+  it('hintsFor 的 n 边界：0 / 负数 / NaN / 超大都不抛', () => {
+    expect(hintsFor(L1, L1.sequence, 0)).toEqual([]);
+    expect(hintsFor(L1, L1.sequence, -3)).toEqual([]);
+    expect(hintsFor(L1, L1.sequence, Number.NaN)).toEqual([]);
+    expect(hintsFor(L1, L1.sequence, Number.POSITIVE_INFINITY)).toEqual([]);
+    expect(hintsFor(L1, L1.sequence, 999)).toHaveLength(14);
   });
 });
