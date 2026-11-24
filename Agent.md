@@ -1,6 +1,6 @@
 # 拼装小鸡协作入口
 
-最后更新：2026-11-24 15:10 UTC
+最后更新：2026-11-24 15:11 UTC
 
 ## 接手先看
 
@@ -66,7 +66,9 @@
 - 远端：`https://github.com/xyyi0719/frameshift`，当前分支 `main`。
 - HTTPS 推送预检失败：`fatal: could not read Username for 'https://github.com': No such device or address`。
 - SSH 认证预检失败：`git@github.com: Permission denied (publickey).`。
-- 当前没有可用的 GitHub 推送认证。文档已整理，待完成本地提交；远端未同步。用户须在执行环境完成认证，凭证不得进文档、提交或聊天。
+- 本地文档提交已完成：`7f2c5ff`，`docs: add gameplay research workbench and user-confirmation workflow`。本文件的后续交接状态更新另有提交，以 `git log` 为准。
+- 实际执行 `git push origin main` 失败（退出码 128）：`fatal: could not read Username for 'https://github.com': terminal prompts disabled`。远端未同步，协作者在 GitHub 暂时看不到本轮文件。
+- 用户须在当前执行环境完成可写该仓库的 HTTPS 或 SSH 认证，之后才能继续推送；凭证不得进文档、提交或聊天。
 - 2026-11-24 已成功抓取远端 main，仍为研究基线。提交与推送分别记录，不强推。
 
 ## 文档维护
@@ -80,7 +82,7 @@
 
 1. 向用户提交第一批四个玩法问题：核心乐趣、首轮循环、战斗参与、自由装配边界；未回答前不实施。
 2. 用户确认后，逐项展开核心循环和系统规则；再按明确范围做 MECE 覆盖审查。
-3. 完成本地文档提交；用户完成本环境 GitHub 认证后，重新检查远端再正常推送。
+3. 用户完成本环境 GitHub 认证后，重新抓取远端检查差异，再正常推送待同步的本地文档提交，不强推。
 
 ## 修订日志
 
@@ -89,3 +91,4 @@
 - 2026-11-24 14:59 UTC：新增工作规范、现状对照与待确认问题、决策记录及两份模板；未修改游戏代码。
 - 2026-11-24 15:08 UTC：新增工作区目录与根 README 协作入口；迁入案例取证并复核四份 Steam 正文，删除未被来源支持的断言。
 - 2026-11-24 15:10 UTC：整合公开 GDD 与方法取证、完成研究汇总和材料迁移；清理临时研究目录，抓取远端仍为原基线，准备本地文档提交。
+- 2026-11-24 15:11 UTC：12 份 Markdown 的内部链接、版本/修订记录、暂存范围、常见凭据模式检查通过，空白检查通过；完成本地提交 `7f2c5ff`，实际推送因 HTTPS 认证缺失失败，远端未同步。
