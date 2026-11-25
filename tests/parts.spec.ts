@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  LEVEL_DIRECTORY,
   PARTS_BY_SLOT,
   PART_BY_ID,
   PART_DEFS,
   SLOT_IDS,
   STAGE1_CATALOG,
-  STAGE1_WAVES,
+  STAGE1_ENCOUNTERS,
   applyEdit,
   createCreature,
   deriveStats,
@@ -14,7 +15,7 @@ import {
   simulate,
 } from '../src/core';
 
-describe('36 个动物 + 机械零件配置表与第 1 关掉落', () => {
+describe('36 个动物 + 机械零件配置表、6 关目录与第 1 关遭遇', () => {
   it('36 个零件，6 部位各 6 个，id 与 geometry key 全唯一且颜色完整', () => {
     expect(PART_DEFS).toHaveLength(36);
     for (const slot of SLOT_IDS) {
@@ -37,15 +38,21 @@ describe('36 个动物 + 机械零件配置表与第 1 关掉落', () => {
     }
   });
 
-  it('第 1 关包含 3 波遭遇、图鉴及随机三选一战利品', () => {
-    expect(STAGE1_WAVES).toHaveLength(3);
+  it('关卡目录包含 1~6 关且第 1 关解锁；第 1 关先小怪（单细胞/小动物）再大怪 BOSS', () => {
+    expect(LEVEL_DIRECTORY).toHaveLength(6);
+    expect(LEVEL_DIRECTORY[0].unlocked).toBe(true);
+    expect(LEVEL_DIRECTORY.slice(1).every((l) => !l.unlocked)).toBe(true);
+
     expect(STAGE1_CATALOG).toHaveLength(3);
+    expect(STAGE1_ENCOUNTERS.length).toBeGreaterThanOrEqual(5);
+    expect(STAGE1_ENCOUNTERS[0].isBoss).toBe(false);
+    expect(STAGE1_ENCOUNTERS[STAGE1_ENCOUNTERS.length - 1].isBoss).toBe(true);
+
     const chick = createCreature('demo');
-    for (const wave of STAGE1_WAVES) {
-      for (const id of wave.dropPool) {
-        expect(PART_BY_ID[id]).toBeDefined();
-      }
-      const picks = rollThreeRewards(wave, chick, 20261125);
+    for (const enc of STAGE1_ENCOUNTERS) {
+      if (!enc.dropPool) continue;
+      for (const id of enc.dropPool) expect(PART_BY_ID[id]).toBeDefined();
+      const picks = rollThreeRewards(enc.dropPool, chick, 20261125, enc.isBoss);
       expect(picks).toHaveLength(3);
       expect(new Set(picks.map((p) => p.def.id)).size).toBe(3);
     }

@@ -1198,3 +1198,497 @@ body.is-dragging * { cursor: grabbing !important; }
   font-size: 9.5px;
   color: #ffe88a;
 }
+
+/* ==========================================================================
+ * 四页面多屏架构、转场幕布、主页面、关卡目录、聚焦键帽教学与终点小地图（P-035~P-038）
+ * ========================================================================== */
+
+#app.build-a-chick {
+  display: block;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.app-stage-root {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
+/* 仅装配车间显示顶栏与左侧零件栏 */
+#app.build-a-chick:not(.screen-assembly) .assembly-only {
+  display: none !important;
+}
+
+.topbar.assembly-only {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 70px;
+  z-index: 30;
+}
+
+.home-back-btn { min-height: 30px; padding: 0 10px; font-size: 11px; }
+
+.assembly-shell {
+  position: absolute;
+  top: 70px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 15;
+  display: grid;
+  grid-template-columns: 336px minmax(0, 1fr);
+  pointer-events: none;
+}
+.assembly-shell .sidebar-host {
+  pointer-events: auto;
+  height: 100%;
+  min-height: 0;
+}
+.assembly-overlay {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  pointer-events: none;
+}
+.assembly-overlay .slot-ring,
+.assembly-overlay .tweak-panel,
+.assembly-overlay .catalog-drawer,
+.assembly-overlay .preset-bar {
+  pointer-events: auto;
+}
+
+/* ---------- 1. 游戏主页面 ---------- */
+.title-screen {
+  position: absolute;
+  inset: 0;
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  padding: 44px 28px 34px;
+  background: radial-gradient(circle at 50% 42%, rgba(8, 22, 30, 0.04) 24%, rgba(5, 14, 20, 0.72) 100%);
+  text-align: center;
+}
+.title-screen[hidden] { display: none; }
+.title-pill {
+  display: inline-block;
+  padding: 5px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(95, 227, 200, 0.55);
+  background: rgba(6, 22, 28, 0.78);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  backdrop-filter: blur(6px);
+}
+.title-logo {
+  margin: 12px 0 0;
+  font-size: 58px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  color: #fffef6;
+  text-shadow: 0 6px 0 #1f4c45, 0 18px 40px rgba(0, 14, 18, 0.55);
+}
+.title-eng {
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.34em;
+  color: #a6fff0;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+}
+.title-tagline {
+  margin: 12px auto 0;
+  max-width: 560px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: rgba(5, 16, 22, 0.62);
+  backdrop-filter: blur(6px);
+  color: #e6f8f5;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.title-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: auto;
+  margin-bottom: 18px;
+}
+.title-start-btn {
+  min-height: 52px !important;
+  padding: 0 34px !important;
+  font-size: 17px !important;
+  border-radius: 10px !important;
+}
+.title-sec-btn {
+  min-height: 46px;
+  padding: 0 18px;
+  background: rgba(7, 20, 27, 0.82) !important;
+  border-color: rgba(124, 206, 212, 0.45) !important;
+  color: #def7f3 !important;
+  font-size: 13px;
+  backdrop-filter: blur(6px);
+}
+.title-status {
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(5, 16, 22, 0.72);
+  color: var(--dim);
+  font-size: 11px;
+}
+
+/* ---------- 2. 关卡目录页（1 ~ 6） ---------- */
+.level-select-screen {
+  position: absolute;
+  inset: 0;
+  z-index: 28;
+  display: flex;
+  flex-direction: column;
+  padding: 24px 36px 28px;
+  background: linear-gradient(160deg, rgba(6, 18, 25, 0.88), rgba(5, 13, 19, 0.94));
+  backdrop-filter: blur(10px);
+  overflow-y: auto;
+}
+.level-select-screen[hidden] { display: none; }
+.level-select-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.level-select-nav { display: flex; gap: 8px; }
+.level-select-title-box { text-align: center; }
+.level-select-title { margin: 4px 0 0; font-size: 24px; color: #f2fffd; }
+.level-chick-brief {
+  padding: 7px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: rgba(95, 227, 200, 0.08);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #c2fff4;
+}
+.level-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  max-width: 1140px;
+  width: 100%;
+  margin: 0 auto;
+}
+.level-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 16px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(11, 27, 35, 0.88);
+  overflow: hidden;
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+.level-card.unlocked {
+  border-color: rgba(95, 227, 200, 0.55);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+}
+.level-card.unlocked:hover {
+  transform: translateY(-4px);
+  border-color: #84ffe8;
+  box-shadow: 0 20px 44px rgba(0, 0, 0, 0.44);
+}
+.level-card.locked { opacity: 0.62; }
+.level-card-stripe { position: absolute; top: 0; left: 0; right: 0; height: 4px; }
+.level-card-top { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; }
+.level-num { font-family: var(--font-mono); font-size: 26px; font-weight: 900; color: rgba(255, 255, 255, 0.9); }
+.level-badge { font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px; }
+.level-badge.open { background: rgba(69, 196, 94, 0.22); color: #9bffad; border: 1px solid rgba(69, 196, 94, 0.45); }
+.level-badge.lock { background: rgba(255, 255, 255, 0.06); color: var(--faint); border: 1px solid var(--line); }
+.level-name { margin: 8px 0 2px; font-size: 17px; color: #f4fffe; }
+.level-sub { font-size: 11px; color: var(--dim); margin-bottom: 10px; }
+.level-meta-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 6px; }
+.level-meta-label { font-size: 9px; color: var(--faint); margin-right: 2px; }
+.level-chip { font-size: 9px; padding: 2px 6px; border-radius: 4px; }
+.level-chip.enemy { background: rgba(255, 107, 122, 0.14); color: #ffd0d6; border: 1px solid rgba(255, 107, 122, 0.28); }
+.level-chip.drop { background: rgba(95, 227, 200, 0.12); color: #c8fff5; border: 1px solid rgba(95, 227, 200, 0.28); }
+.level-card-foot { margin-top: auto; padding-top: 10px; }
+.level-enter-btn { width: 100%; }
+
+/* ---------- 3. 画面切换转场幕布 ---------- */
+.screen-transition {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #061720, #0b2d36);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 240ms ease;
+}
+.screen-transition.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+.transition-card { text-align: center; padding: 20px; }
+.transition-title { font-size: 32px; font-weight: 900; letter-spacing: 0.08em; color: #9bfff0; }
+.transition-sub { margin-top: 8px; font-size: 13px; color: #d9f3ef; }
+
+/* ---------- 4. 2.5D/3D 关卡全屏 HUD & 右上角实时终点小地图 ---------- */
+.level-hud-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 22;
+  pointer-events: none;
+}
+.level-hud-layer[hidden] { display: none; }
+.level-top-bar {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  z-index: 28;
+}
+.level-hp-card {
+  width: 240px;
+  padding: 9px 12px;
+  border: 1px solid rgba(124, 206, 212, 0.45);
+  border-radius: 10px;
+  background: rgba(6, 19, 25, 0.85);
+  backdrop-filter: blur(8px);
+}
+.level-hp-card.enemy { width: 290px; border-color: rgba(255, 120, 134, 0.5); }
+.level-hp-card.enemy.boss {
+  width: 340px;
+  border-color: rgba(255, 208, 56, 0.85);
+  box-shadow: 0 0 24px rgba(255, 208, 56, 0.25);
+}
+.level-hp-card[hidden] { display: none; }
+.target-bio-tag { margin-top: 5px; font-size: 10px; color: #9cf5e7; }
+
+/* 右上角小地图 */
+.minimap-card {
+  width: 300px;
+  padding: 9px 12px 8px;
+  border: 1px solid rgba(95, 227, 200, 0.5);
+  border-radius: 10px;
+  background: rgba(6, 19, 25, 0.88);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 10px 26px rgba(0, 12, 18, 0.35);
+}
+.minimap-head { display: flex; justify-content: space-between; align-items: center; font-size: 10px; margin-bottom: 8px; }
+.minimap-title { font-weight: 800; color: var(--accent); }
+.minimap-flag-label { color: #ffe580; font-family: var(--font-mono); font-size: 9px; }
+.minimap-track {
+  position: relative;
+  height: 26px;
+  margin: 0 8px;
+}
+.minimap-rail {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 4px;
+  transform: translateY(-50%);
+  border-radius: 4px;
+  background: linear-gradient(90deg, #5fe3c8, #ffe066);
+  opacity: 0.45;
+}
+.minimap-finish {
+  position: absolute;
+  right: -8px;
+  top: 50%;
+  transform: translateY(-55%);
+  font-size: 15px;
+}
+.minimap-dot {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #ff6b7a;
+  border: 1.5px solid #fff;
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+.minimap-dot.boss {
+  width: auto;
+  height: auto;
+  background: transparent;
+  border: 0;
+  font-size: 15px;
+  filter: drop-shadow(0 0 6px rgba(255, 212, 74, 0.9));
+}
+.minimap-dot.dead { opacity: 0.22; transform: translate(-50%, -50%) scale(0.65); }
+.minimap-player {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -55%);
+  font-size: 17px;
+  z-index: 4;
+  filter: drop-shadow(0 0 8px rgba(255, 224, 102, 0.95));
+  transition: left 60ms linear;
+}
+.minimap-status {
+  margin-top: 4px;
+  font-size: 10px;
+  color: #def7f3;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 生物学习科普条 */
+.bio-banner {
+  position: absolute;
+  top: 84px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 26;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(680px, 92%);
+  padding: 8px 14px;
+  border: 1px solid rgba(95, 227, 200, 0.55);
+  border-radius: 999px;
+  background: rgba(6, 22, 28, 0.88);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.3);
+}
+.bio-banner[hidden] { display: none; }
+.bio-banner-tag { font-size: 11px; font-weight: 800; color: #8dffec; white-space: nowrap; }
+.bio-banner-text { font-size: 11px; color: #eaf8f6; }
+
+/* ---------- 5. 聚焦式分步教学 + 3D 实体机械键帽样式（P-036） ---------- */
+.tutorial-spotlight {
+  position: absolute;
+  inset: 0;
+  z-index: 24;
+  background: radial-gradient(circle at 46% 58%, transparent 18%, rgba(4, 12, 18, 0.58) 68%);
+  pointer-events: none;
+}
+.tutorial-spotlight[hidden] { display: none; }
+
+.focus-tutorial-card {
+  position: absolute;
+  left: 50%;
+  bottom: 92px;
+  transform: translateX(-50%);
+  z-index: 29;
+  width: min(460px, 92%);
+  padding: 16px 20px;
+  border: 2px solid rgba(114, 255, 226, 0.85);
+  border-radius: 14px;
+  background: rgba(6, 20, 27, 0.94);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 0 0 6px rgba(95, 227, 200, 0.14), 0 22px 54px rgba(0, 0, 0, 0.5);
+  text-align: center;
+  pointer-events: auto;
+  animation: focus-pop 240ms ease-out;
+}
+.focus-tutorial-card[hidden] { display: none; }
+@keyframes focus-pop {
+  from { opacity: 0; transform: translate(-50%, 14px) scale(0.96); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+.focus-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.focus-step { font-family: var(--font-mono); font-size: 10px; font-weight: 800; color: var(--accent); letter-spacing: 0.08em; }
+.focus-skip {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.focus-skip:hover { color: var(--ink); border-color: var(--line-strong); }
+.focus-title { margin: 2px 0 12px; font-size: 20px; font-weight: 900; color: #ffffff; }
+.focus-keys { display: flex; justify-content: center; align-items: center; gap: 14px; margin-bottom: 12px; }
+.focus-desc { margin: 0; font-size: 12px; line-height: 1.5; color: #cde8e4; }
+
+/* 实体 3D 机械键帽（按下真实物理下陷 + 霓虹点亮） */
+.keycap {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  height: 50px;
+  padding: 4px 12px;
+  border: 2px solid #8cfff0;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #274452, #152b35);
+  box-shadow:
+    0 6px 0 #0a181f,
+    0 10px 18px rgba(0, 0, 0, 0.45),
+    inset 0 2px 1px rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+  font-family: var(--font-mono);
+  transition: transform 70ms ease, box-shadow 70ms ease, background 70ms ease;
+  user-select: none;
+}
+.keycap.wide { min-width: 150px; }
+.keycap-top { font-size: 18px; font-weight: 900; line-height: 1.1; }
+.keycap-sub { font-size: 9px; color: #9effef; margin-top: 2px; font-family: var(--font-ui); }
+.keycap.pressed {
+  transform: translateY(5px);
+  background: linear-gradient(180deg, #6ff0d5, #2fb39b);
+  color: #04120f;
+  border-color: #d9fff8;
+  box-shadow:
+    0 1px 0 #0a181f,
+    0 0 24px rgba(95, 227, 200, 0.85);
+}
+.keycap.pressed .keycap-sub { color: #04221c; }
+
+/* 底部常驻实时键盘键帽栏 */
+.keycap-hud-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 27;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 16px;
+  border: 1px solid rgba(124, 206, 212, 0.42);
+  border-radius: 12px;
+  background: rgba(6, 18, 24, 0.88);
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+}
+.hud-key-group { display: flex; align-items: center; gap: 6px; }
+.hud-key-group .keycap {
+  min-width: 32px;
+  height: 30px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border-width: 1.5px;
+  box-shadow: 0 3px 0 #09141a, inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+.hud-key-group .keycap.wide { min-width: 68px; }
+.hud-key-group .keycap-top { font-size: 12px; }
+.hud-key-group .keycap.pressed { transform: translateY(3px); box-shadow: 0 0 16px rgba(95, 227, 200, 0.8); }
+.hud-key-action { font-size: 11px; color: #d8f2ee; white-space: nowrap; }
+.hud-back-actions { display: flex; gap: 6px; padding-left: 8px; border-left: 1px solid var(--line); }
+
+.reward-card.tone-boss { border-color: rgba(255, 196, 61, 0.85); background: rgba(255, 196, 61, 0.08); }
+.reward-badge.boss { background: rgba(255, 196, 61, 0.25); color: #ffe67a; }

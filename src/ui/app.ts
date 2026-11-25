@@ -1,12 +1,11 @@
 /**
- * 拼装小鸡 · 第 1 关肉鸽可玩 Demo 主编排
+ * 拼装小鸡 · 四页面多屏架构主编排（P-035 ~ P-038）
  * ---------------------------------------------------------------
- * 集成：
- *   - 36 项动物 + 机械零件库（同件叠 3 阶变色发光出粒子 + 躯干 3 种分区拼色融合）
- *   - 8 组特殊组合彩蛋与物理冲突实时提示与战斗生效
- *   - 精简版部位造型微调（位移/旋转/缩放/重置，仅影响造型）
- *   - 撤销（Ctrl+Z / 按钮）+ 3 套方案保存与切换（localStorage）
- *   - 第 1 关可遇动物图鉴 + 3 波递进键盘操控关卡 + 战后「随机三选一」肉鸽掉落！
+ * 路线 A 完整画面流（配流畅幕布转场 + 3D 镜头切换）：
+ *   1. 'title'    ：全屏 3D 游戏主页面
+ *   2. 'assembly' ：专属装配车间（左侧 36 件动物+机械零件库、躯干 3 拼色、3 阶粒子、微调、撤销、3 方案保存）
+ *   3. 'select'   ：关卡目录页（1 ~ 6 关目录卡片）
+ *   4. 'level'    ：全屏 2.5D 横版 3D 推图关卡（聚焦式实体键帽教学 + 单细胞/小动物小怪 + 关底 BOSS + 右上角终点小地图 + 三选一）
  */
 
 import './../styles.css';
@@ -15,7 +14,6 @@ import {
   PART_DEFS,
   SLOT_IDS,
   STAGE1_CATALOG,
-  STAGE1_WAVES,
   SYNERGIES,
   applyEdit,
   cloneCreature,
@@ -29,7 +27,7 @@ import {
   type PartDef,
   type SlotId,
   type SlotTweak,
-  type StageWaveDef,
+  type StageEncounter,
   type SynergyNote,
 } from '../core';
 import { ChickModel } from '../render3d/chick';
@@ -39,11 +37,14 @@ import { PartDrag } from './drag';
 import { PerfPanel } from './perf';
 import { RewardModal } from './reward-modal';
 import { SlotRings } from './rings';
+import { LevelSelectScreen, ScreenTransition, TitleScreen } from './screens';
 import { Sidebar } from './sidebar';
 import { StageBattleArena } from './stage-battle';
 import { StatsBar } from './stats-bar';
 import { t } from './strings';
 import { TweakPanel } from './tweak-panel';
+
+type AppScreen = 'title' | 'assembly' | 'select' | 'level';
 
 const PRESET_STORAGE_KEY = 'build-a-chick.presets.v1';
 
@@ -67,7 +68,7 @@ function savePresets(data: Record<string, SavedPreset>): void {
   try {
     localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(data));
   } catch {
-    // 忽略隐私模式存储受限
+    // ignore storage quota errors
   }
 }
 
@@ -86,7 +87,14 @@ export class App {
   private readonly root: HTMLElement;
   private readonly scene: SceneView;
   private readonly player: ChickModel;
-  private readonly enemy: ChickModel;
+
+  private readonly transition: ScreenTransition;
+  private readonly titleScreen: TitleScreen;
+  private readonly levelSelectScreen: LevelSelectScreen;
+
+  // 装配车间专属 UI 层
+  private readonly topbar: HTMLElement;
+  private readonly sidebarHost: HTMLElement;
   private readonly sidebar: Sidebar;
   private readonly rings: SlotRings;
   private readonly statsBar: StatsBar;
@@ -96,28 +104,22 @@ export class App {
   private readonly battle: StageBattleArena;
   private readonly drag: PartDrag;
   private readonly toast: HTMLElement;
-  private readonly fightBtn: HTMLButtonElement;
   private readonly undoBtn: HTMLButtonElement;
-  private readonly perfBtn: HTMLButtonElement;
   private readonly catalogBtn: HTMLButtonElement;
   private readonly catalogDrawer: HTMLElement;
   private readonly presetBar: HTMLElement;
   private readonly notesEl: HTMLElement;
   private readonly countEl: HTMLElement;
-  private readonly battleBadge: HTMLElement;
   private readonly stageInfo: HTMLElement;
-  private readonly stageLineText: HTMLElement;
-  private readonly stageHintEl: HTMLElement;
   private readonly stageFooter: HTMLElement;
 
+  private screen: AppScreen = 'title';
   private creature: Creature = createCreature('local-chick');
   private history: Creature[] = [];
   private ownedIds = new Set<string>();
   private sandboxMode = false;
-  private currentWaveIdx = 0;
-  private stageCleared = false;
+  private stage1Cleared = false;
   private stats: CreatureStats;
-  private phase: 'idle' | 'battle' | 'reward' = 'idle';
   private lastFrame = performance.now();
   private raf = 0;
   private pendingToast: number | null = null;
@@ -125,74 +127,60 @@ export class App {
 
   constructor(root: HTMLElement) {
     this.root = root;
-    root.classList.add('build-a-chick');
+    root.classList.add('build-a-chick', 'screen-title');
     root.replaceChildren();
 
-    // ---------- 顶栏 ----------
-    const header = el('header', 'topbar');
+    // ---------- 1. 全屏底层 3D 画布（四页面共享，切换时平滑运镜） ----------
+    const stageRoot = el('div', 'app-stage-root');
+    const sceneHost = el('div', 'scene-host');
+    stageRoot.append(sceneHost);
+    root.append(stageRoot);
+
+    this.scene = new SceneView(sceneHost);
+    this.player = new ChickModel({ variant: 'player' });
+    this.scene.attach(this.player.root);
+    this.scene.attach(this.player.shadow);
+
+    // ---------- 2. 装配车间 UI（仅在 screen === 'assembly' 时显示） ----------
+    this.topbar = el('header', 'topbar assembly-only');
     const brand = el('div', 'brand');
-    const mark = el('div', 'brand-mark');
-    mark.innerHTML = '<span></span><span></span><span></span>';
+    const backHome = el('button', 'btn ghost home-back-btn', '← 主页');
+    backHome.type = 'button';
+    backHome.addEventListener('click', () => this.goScreen('title'));
     const brandText = el('div', 'brand-text');
     brandText.append(
-      el('h1', 'brand-title', t('app.title')),
-      el('div', 'brand-sub', t('app.subtitle')),
+      el('h1', 'brand-title', '装配车间'),
+      el('div', 'brand-sub', 'ASSEMBLY WORKSHOP'),
     );
-    brand.append(mark, brandText);
+    brand.append(backHome, brandText);
 
     const statsHost = el('div', 'stats-host');
     const actions = el('div', 'top-actions');
 
     this.undoBtn = el('button', 'btn ghost', t('button.undo'));
     this.undoBtn.type = 'button';
-    this.undoBtn.title = '撤销上一步装配或微调（Ctrl+Z）';
     this.undoBtn.disabled = true;
     this.undoBtn.addEventListener('click', () => this.undo());
 
-    this.catalogBtn = el('button', 'btn ghost active', t('button.catalog'));
+    this.catalogBtn = el('button', 'btn ghost', '生物图鉴');
     this.catalogBtn.type = 'button';
     this.catalogBtn.addEventListener('click', () => this.toggleCatalog());
 
-    this.perfBtn = el('button', 'btn ghost perf-toggle', t('button.perf'));
-    this.perfBtn.type = 'button';
-    this.perfBtn.addEventListener('click', () => this.togglePerf());
+    const toSelectBtn = el('button', 'btn primary fight-btn', '选择关卡 →');
+    toSelectBtn.type = 'button';
+    toSelectBtn.addEventListener('click', () => this.goScreen('select'));
 
-    const newRunBtn = el('button', 'btn ghost', '重开肉鸽');
-    newRunBtn.type = 'button';
-    newRunBtn.title = '从光鸡 + 第 1 波重新开始一局肉鸽';
-    newRunBtn.addEventListener('click', () => this.resetRoguelikeRun());
+    actions.append(this.undoBtn, this.catalogBtn, toSelectBtn);
+    this.topbar.append(brand, statsHost, actions);
+    root.append(this.topbar);
 
-    this.fightBtn = el('button', 'btn primary fight-btn', '出战第 1 关 · W1');
-    this.fightBtn.type = 'button';
-    this.fightBtn.addEventListener('click', () => this.startCurrentWave());
+    const assemblyShell = el('div', 'assembly-shell assembly-only');
+    this.sidebarHost = el('div', 'sidebar-host');
+    const assemblyOverlay = el('div', 'assembly-overlay');
+    assemblyShell.append(this.sidebarHost, assemblyOverlay);
+    root.append(assemblyShell);
 
-    actions.append(this.undoBtn, this.catalogBtn, newRunBtn, this.perfBtn, this.fightBtn);
-    header.append(brand, statsHost, actions);
-    root.append(header);
-
-    // ---------- 工作区 ----------
-    const workspace = el('main', 'workspace');
-    const sidebarHost = el('div', 'sidebar-host');
-    const viewport = el('section', 'viewport');
-    viewport.setAttribute('aria-label', '装配与第 1 关战场');
-    const sceneHost = el('div', 'scene-host');
-    viewport.append(sceneHost);
-    workspace.append(sidebarHost, viewport);
-    root.append(workspace);
-
-    // 3D 场景与双鸡模型
-    this.scene = new SceneView(sceneHost);
-    this.player = new ChickModel({ variant: 'player' });
-    this.enemy = new ChickModel({ variant: 'enemy', headColor: 0x6fd152 });
-    this.scene.attach(this.player.root);
-    this.scene.attach(this.player.shadow);
-    this.scene.attach(this.enemy.root);
-    this.scene.attach(this.enemy.shadow);
-    this.enemy.root.visible = false;
-    this.enemy.shadow.visible = false;
-
-    // 侧栏
-    this.sidebar = new Sidebar(sidebarHost, {
+    this.sidebar = new Sidebar(this.sidebarHost, {
       onPartPointerDown: (def, event) => this.drag.start(def, event),
       onAdd: (def) => this.equipPart(def),
       onRemove: (def) => this.downgradePart(def),
@@ -203,14 +191,13 @@ export class App {
         this.sandboxMode = sandbox;
         this.refresh();
         this.showToast(
-          sandbox ? '已开启全件自由试装（36 件全开，可自由测试拼色与彩蛋）' : '已切回第 1 关肉鸽掉落背包',
+          sandbox ? '已开启全件试装（36 件全开，可自由体验 3 拼色与 3 阶粒子）' : '已切回肉鸽背包模式',
           'info',
         );
       },
     });
 
-    // 3D 槽位环（点击打开造型微调，拖入完成装配）
-    this.rings = new SlotRings(viewport, (slot) => this.openTweak(slot));
+    this.rings = new SlotRings(assemblyOverlay, (slot) => this.openTweak(slot));
     this.drag = new PartDrag(root, this.rings, {
       onTap: (def) => this.equipPart(def),
       onDrop: (def, slot) => {
@@ -223,40 +210,28 @@ export class App {
     });
 
     this.statsBar = new StatsBar(statsHost);
-    this.perf = new PerfPanel(viewport, {
-      onAddLegs: () => this.loadDemoCombo('thorn_turtle'),
-      onAddWings: () => this.loadDemoCombo('rocket_headbutt'),
-      onClear: () => this.clearAll(),
-    });
 
-    this.tweakPanel = new TweakPanel(viewport, {
+    this.tweakPanel = new TweakPanel(assemblyOverlay, {
       onChange: (slot, tweak) => this.applyTweak(slot, tweak),
       onReset: (slot) => this.resetTweak(slot),
       onClose: () => this.rings.setSelected(null),
     });
 
-    this.rewardModal = new RewardModal(viewport);
-
-    // 左上角第 1 关进度 + 方案保存快捷条
+    // 装配台左上角方案保存栏
     this.stageInfo = el('div', 'stage-info');
     const stageLine = el('div', 'stage-line');
-    this.stageLineText = el('span', '', 'STAGE 1 · 菜园初遇（第 1 / 3 波）');
-    stageLine.append(el('span', 'live-dot'), this.stageLineText);
-    this.stageHintEl = el(
-      'div',
-      'stage-hint',
-      '点「出战第 1 关」直接用键盘试玩教学关！击败动物即可随机三选一拿零件。',
-    );
+    stageLine.append(el('span', 'live-dot'), el('span', '', '点击槽位环可微调 3D 造型 · 躯干支持 3 拼色融合'));
     this.presetBar = el('div', 'preset-bar');
     this.renderPresets();
-    this.stageInfo.append(stageLine, this.stageHintEl, this.presetBar);
-    viewport.append(this.stageInfo);
+    this.stageInfo.append(stageLine, this.presetBar);
+    assemblyOverlay.append(this.stageInfo);
 
-    // 右上角可折叠「第 1 关可遇动物图鉴」（默认展开让新玩家一眼看到能获得哪些动物！）
+    // 装配台可折叠生物图鉴（默认收起，点顶栏按钮展开，画面更干净）
     this.catalogDrawer = this.buildCatalogDrawer();
-    viewport.append(this.catalogDrawer);
+    this.catalogDrawer.hidden = true;
+    assemblyOverlay.append(this.catalogDrawer);
 
-    // 底部彩蛋组合提示栏
+    // 装配台底部彩蛋组合提示
     this.stageFooter = el('div', 'stage-footer');
     const noteWrap = el('div', 'notes-wrap');
     noteWrap.append(el('span', 'notes-label', t('note.synergy')));
@@ -264,22 +239,44 @@ export class App {
     noteWrap.append(this.notesEl);
     this.countEl = el('div', 'part-total', '0 PARTS');
     this.stageFooter.append(noteWrap, this.countEl);
-    viewport.append(this.stageFooter);
+    assemblyOverlay.append(this.stageFooter);
 
-    this.battleBadge = el('div', 'battle-badge', t('battle.auto'));
-    this.battleBadge.hidden = true;
-    viewport.append(this.battleBadge);
-
-    // 键盘实时战斗场
-    this.battle = new StageBattleArena(viewport, this.scene, this.player, this.enemy, {
-      onWin: (wave) => this.handleWaveWin(wave),
-      onLose: () => {
-        // 战败弹窗由 StageBattleArena 呈现
-      },
-      onExit: () => this.endBattleToLab(),
-      onRetry: () => this.startCurrentWave(),
+    // ---------- 3. 页面 1：主页面 ----------
+    this.titleScreen = new TitleScreen(root, {
+      onStartAssembly: () => this.goScreen('assembly'),
+      onGoLevelSelect: () => this.goScreen('select'),
+      onResetRun: () => this.resetRoguelikeRun(),
     });
 
+    // ---------- 4. 页面 3：关卡目录页（1 ~ 6 关） ----------
+    this.levelSelectScreen = new LevelSelectScreen(root, {
+      onBackToAssembly: () => this.goScreen('assembly'),
+      onBackToTitle: () => this.goScreen('title'),
+      onEnterLevel: (item) => {
+        if (item.unlocked) this.enterStage1();
+      },
+    });
+
+    // ---------- 5. 页面 4：全屏 2.5D/3D 推图关卡 ----------
+    this.battle = new StageBattleArena(root, this.scene, this.player, {
+      onRequestLoot: (encounter, onPicked) => this.openLootModal(encounter, onPicked),
+      onStageClear: () => {
+        this.stage1Cleared = true;
+        this.titleScreen.setSummary(this.ownedIds.size, this.stage1Cleared);
+      },
+      onGoAssembly: () => this.goScreen('assembly'),
+      onGoLevelSelect: () => this.goScreen('select'),
+      onRetry: () => this.enterStage1(false),
+    });
+
+    // 战后随机三选一弹窗 + F3 性能面板 + 转场层 + Toast
+    this.rewardModal = new RewardModal(root);
+    this.perf = new PerfPanel(root, {
+      onAddLegs: () => this.loadDemoCombo('thorn_turtle'),
+      onAddWings: () => this.loadDemoCombo('rocket_headbutt'),
+      onClear: () => this.clearAll(),
+    });
+    this.transition = new ScreenTransition(root);
     this.toast = el('div', 'toast');
     root.append(this.toast);
 
@@ -287,13 +284,106 @@ export class App {
 
     this.stats = deriveStats(this.creature, PART_DEFS, SYNERGIES);
     this.refresh();
+    this.applyScreenImmediate('title');
     this.player.update(0.016, performance.now() / 1000, false);
     this.loop(performance.now());
   }
 
+  /* ==========================================================================
+   * 四页面切换 + 转场运镜（路线 A）
+   * ========================================================================== */
+
+  private goScreen(next: AppScreen): void {
+    const banners: Partial<Record<AppScreen, { title: string; subtitle: string; holdMs: number }>> = {
+      assembly: { title: '装配车间', subtitle: '给小鸡装上动物与机械零件', holdMs: 180 },
+      select: { title: '关卡目录', subtitle: '选择要挑战的演化地图', holdMs: 180 },
+    };
+    this.transition.run(() => this.applyScreenImmediate(next), banners[next]);
+  }
+
+  private enterStage1(withBanner = true): void {
+    const banner = withBanner
+      ? { title: 'STAGE 01 · 微光池畔', subtitle: '从单细胞开始进化 · 击败关底 BOSS 夺取技能', holdMs: 650 }
+      : undefined;
+    this.transition.run(() => {
+      this.applyScreenImmediate('level');
+      this.battle.start(this.stats, true);
+    }, banner);
+  }
+
+  private applyScreenImmediate(next: AppScreen): void {
+    if (this.screen === 'level' && next !== 'level') {
+      this.battle.stop();
+      this.rewardModal.close();
+    }
+    this.screen = next;
+    this.root.classList.remove('screen-title', 'screen-assembly', 'screen-select', 'screen-level');
+    this.root.classList.add(`screen-${next}`);
+
+    this.titleScreen.setVisible(next === 'title');
+    this.levelSelectScreen.setVisible(next === 'select');
+    this.rings.setVisible(next === 'assembly');
+    if (next !== 'assembly') {
+      this.tweakPanel.close();
+      this.rings.setSelected(null);
+    }
+
+    this.scene.setMode(next, next === 'level');
+    if (next !== 'level') {
+      this.player.setWorld(0, 0, 0);
+      this.player.setFacing(1);
+      this.player.setDown(false);
+    }
+
+    if (next === 'select') {
+      this.levelSelectScreen.render(
+        `出战小鸡：HP ${this.stats.hp} · ATK ${this.stats.atk} · DEF ${this.stats.def} · 已装 ${countParts(this.creature)} 项`,
+        this.stage1Cleared,
+      );
+    }
+    this.titleScreen.setSummary(this.ownedIds.size, this.stage1Cleared);
+    this.refresh();
+  }
+
+  private openLootModal(
+    encounter: StageEncounter,
+    onPicked: (nextStats: CreatureStats) => void,
+  ): void {
+    const pool = encounter.dropPool ?? [];
+    const seed = (Date.now() ^ (encounter.spawnX * 2654435)) >>> 0;
+    const options = rollThreeRewards(pool, this.creature, seed, encounter.isBoss);
+    this.rewardModal.open(encounter.name, encounter.isBoss ? 3 : 1, options, (pickedDef) => {
+      this.ownedIds.add(pickedDef.id);
+      const res = applyEdit(this.creature, {
+        type: 'equipOrUpgrade',
+        slot: pickedDef.slot,
+        defId: pickedDef.id,
+      });
+      if (res.ok) {
+        this.creature = res.creature;
+        this.stats = res.stats;
+        this.player.setCreature(this.creature);
+        this.player.flashSlot(pickedDef.slot);
+        this.showToast(`获得并装备：${pickedDef.name.zh}！`, 'ok');
+      } else {
+        this.showToast(`「${pickedDef.name.zh}」已收入零件背包！`, 'info');
+      }
+      this.refresh();
+      onPicked(this.stats);
+    });
+  }
+
+  /* ==========================================================================
+   * 快捷键 / 图鉴 / 装配 / 撤销 / 方案保存
+   * ========================================================================== */
+
   private onGlobalKey = (ev: KeyboardEvent): void => {
-    if (this.phase !== 'idle') return;
-    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z') {
+    if (ev.code === 'F3') {
+      ev.preventDefault();
+      this.perf.setOpen(!this.perf.isOpen);
+      return;
+    }
+    if (this.screen === 'assembly' && (ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z') {
       ev.preventDefault();
       this.undo();
     }
@@ -302,7 +392,7 @@ export class App {
   private buildCatalogDrawer(): HTMLElement {
     const box = el('aside', 'catalog-drawer');
     const head = el('div', 'catalog-head');
-    head.append(el('span', 'catalog-title', '🐾 第 1 关可遭遇动物 & 随机掉落'));
+    head.append(el('span', 'catalog-title', '🧬 第 1 关生物演化与掉落图鉴'));
     const close = el('button', 'catalog-close', '收起');
     close.type = 'button';
     close.addEventListener('click', () => this.toggleCatalog());
@@ -314,11 +404,7 @@ export class App {
       const top = el('div', 'catalog-item-top');
       const dot = el('span', 'catalog-dot');
       dot.style.background = entry.iconColor;
-      top.append(
-        dot,
-        el('b', 'catalog-name', entry.name),
-        el('span', 'catalog-wave', `第 ${entry.wave} 波`),
-      );
+      top.append(dot, el('b', 'catalog-name', entry.name));
       const blurb = el('p', 'catalog-blurb', entry.blurb);
       const drops = el('div', 'catalog-drops');
       for (const id of entry.sampleDrops) {
@@ -328,7 +414,6 @@ export class App {
       row.append(top, blurb, drops);
       list.append(row);
     }
-
     box.append(head, list);
     return box;
   }
@@ -339,10 +424,6 @@ export class App {
     this.catalogBtn.classList.toggle('active', !nextHidden);
   }
 
-  /* ==========================================================================
-   * 装配、叠阶、微调、撤销与方案保存
-   * ========================================================================== */
-
   private pushHistory(): void {
     this.history.push(cloneCreature(this.creature));
     if (this.history.length > 25) this.history.shift();
@@ -350,7 +431,7 @@ export class App {
   }
 
   private undo(): void {
-    if (this.phase !== 'idle' || this.history.length === 0) return;
+    if (this.screen !== 'assembly' || this.history.length === 0) return;
     const prev = this.history.pop();
     if (!prev) return;
     this.creature = prev;
@@ -360,7 +441,7 @@ export class App {
   }
 
   private equipPart(def: PartDef): void {
-    if (this.phase !== 'idle') return;
+    if (this.screen !== 'assembly') return;
     const res = applyEdit(this.creature, { type: 'equipOrUpgrade', slot: def.slot, defId: def.id });
     if (!res.ok) {
       if (res.code === 'max_level') this.showToast(t('toast.maxLevel', { name: def.name.zh }), 'info');
@@ -388,7 +469,7 @@ export class App {
   }
 
   private downgradePart(def: PartDef): void {
-    if (this.phase !== 'idle') return;
+    if (this.screen !== 'assembly') return;
     const res = applyEdit(this.creature, { type: 'downgradePart', slot: def.slot, defId: def.id });
     if (!res.ok) return;
     this.pushHistory();
@@ -403,7 +484,7 @@ export class App {
   }
 
   private clearSlot(slot: SlotId): void {
-    if (this.phase !== 'idle' || this.creature.slots[slot].length === 0) return;
+    if (this.screen !== 'assembly' || this.creature.slots[slot].length === 0) return;
     const res = applyEdit(this.creature, { type: 'clearSlot', slot });
     if (!res.ok) return;
     this.pushHistory();
@@ -414,7 +495,7 @@ export class App {
   }
 
   private clearAll(): void {
-    if (this.phase !== 'idle') return;
+    if (this.screen !== 'assembly') return;
     this.pushHistory();
     this.creature = createCreature(this.creature.id);
     this.tweakPanel.close();
@@ -424,7 +505,7 @@ export class App {
   }
 
   private openTweak(slot: SlotId): void {
-    if (this.phase !== 'idle') return;
+    if (this.screen !== 'assembly') return;
     if (this.creature.slots[slot].length === 0) {
       this.showToast(`「${t(`slot.${slot}` as 'slot.body')}」还没装零件，装上后即可微调造型`, 'info');
       return;
@@ -468,11 +549,10 @@ export class App {
           for (const inst of this.creature.slots[s]) this.ownedIds.add(inst.defId);
         }
         this.refresh();
-        this.showToast(`已切换至已保存方案 #${key}`, 'ok');
+        this.showToast(`已切换至方案 #${key}`, 'ok');
       });
       const saveBtn = el('button', 'preset-save', '存');
       saveBtn.type = 'button';
-      saveBtn.title = `保存当前造型到方案 #${key}`;
       saveBtn.addEventListener('click', () => this.savePreset(key));
       wrap.append(loadBtn, saveBtn);
       this.presetBar.append(wrap);
@@ -487,11 +567,10 @@ export class App {
     };
     savePresets(this.presets);
     this.renderPresets();
-    this.showToast(`已保存当前小鸡方案到 #${key}`, 'ok');
+    this.showToast(`已保存当前小鸡造型到方案 #${key}`, 'ok');
   }
 
   private loadDemoCombo(kind: 'thorn_turtle' | 'rocket_headbutt'): void {
-    if (this.phase !== 'idle') return;
     this.pushHistory();
     this.sandboxMode = true;
     const loadout: Partial<Record<SlotId, string[]>> =
@@ -517,26 +596,19 @@ export class App {
       for (const inst of this.creature.slots[s]) this.ownedIds.add(inst.defId);
     }
     this.refresh();
-    this.showToast(
-      kind === 'thorn_turtle'
-        ? '已一键试装：3 拼色「反甲铁龟 + 带刺弹力球 + 移动铁桶堡垒」'
-        : '已一键试装：满 3 阶粒子「火箭头槌 + 高空制空炮台」',
-      'ok',
-    );
+    this.showToast('已加载演示预设！', 'ok');
   }
 
   private resetRoguelikeRun(): void {
-    if (this.phase !== 'idle') return;
-    this.pushHistory();
     this.creature = createCreature(this.creature.id);
+    this.history = [];
     this.ownedIds.clear();
     this.sandboxMode = false;
-    this.currentWaveIdx = 0;
-    this.stageCleared = false;
-    this.tweakPanel.close();
-    this.rings.setSelected(null);
+    this.stage1Cleared = false;
+    this.undoBtn.disabled = true;
     this.refresh();
-    this.showToast('已重开第 1 关肉鸽闯关，光鸡起步！', 'info');
+    this.titleScreen.setSummary(0, false);
+    this.showToast('已重置肉鸽存档，光鸡重新出发！', 'info');
   }
 
   private refresh(): void {
@@ -545,21 +617,9 @@ export class App {
     this.rings.setCreature(this.creature);
     this.stats = deriveStats(this.creature, PART_DEFS, SYNERGIES);
     this.statsBar.setStats(this.stats);
-
     const bodyCount = this.creature.slots.body.length;
     this.countEl.textContent = `已装 ${countParts(this.creature)} 项 · 躯干拼色 ${bodyCount}/3`;
     this.renderNotes(synergyNotes(this.creature, PART_DEFS, SYNERGIES));
-
-    const wave = STAGE1_WAVES[this.currentWaveIdx] ?? STAGE1_WAVES[0];
-    this.stageLineText.textContent = this.stageCleared
-      ? 'STAGE 1 已通关！可继续刷第 1 关叠 3 阶或自由试装'
-      : `STAGE 1 · 菜园初遇（第 ${wave.waveNumber} / ${STAGE1_WAVES.length} 波：${wave.name}）`;
-    this.stageHintEl.textContent = this.stageCleared
-      ? '已解锁第 1 关循环挑战！点左侧「全件试装」也可直接体验全部 36 件与 8 组彩蛋。'
-      : `下波对手：${wave.name}（${wave.animalTag}）· 点击槽位环可微调 3D 造型。`;
-    this.fightBtn.textContent = this.stageCleared
-      ? `再刷第 1 关 · W${wave.waveNumber}`
-      : `出战第 1 关 · W${wave.waveNumber}`;
   }
 
   private renderNotes(notes: readonly SynergyNote[]): void {
@@ -574,77 +634,6 @@ export class App {
       this.notesEl.append(el('span', `note-chip ${note.tone}`, note.text.zh));
     }
     if (notes.length > 4) this.notesEl.append(el('span', 'note-more', `+${notes.length - 4}`));
-  }
-
-  /* ==========================================================================
-   * 第 1 关闯关 & 战后肉鸽三选一
-   * ========================================================================== */
-
-  private startCurrentWave(): void {
-    if (this.phase === 'battle') return;
-    const wave = STAGE1_WAVES[this.currentWaveIdx] ?? STAGE1_WAVES[0];
-
-    this.phase = 'battle';
-    this.tweakPanel.close();
-    this.rings.setSelected(null);
-    this.rings.setVisible(false);
-    this.sidebar.setDisabled(true);
-    this.fightBtn.disabled = true;
-    this.fightBtn.textContent = t('button.fighting');
-    this.battleBadge.hidden = false;
-    this.stageInfo.hidden = true;
-    this.stageFooter.hidden = true;
-    this.catalogDrawer.hidden = true;
-    this.catalogBtn.classList.remove('active');
-
-    const enemyCreature = buildCreatureFromLoadout(`enemy-${wave.id}`, wave.loadout);
-    this.enemy.setCreature(enemyCreature);
-    const enemyDerived = deriveStats(enemyCreature, PART_DEFS, SYNERGIES);
-
-    this.battle.start(wave, this.stats, enemyDerived);
-    this.showToast(`第 ${wave.waveNumber} 波开始：迎战「${wave.name}」！`, 'ok');
-  }
-
-  private handleWaveWin(wave: StageWaveDef): void {
-    this.phase = 'reward';
-    const seed = (Date.now() ^ (wave.waveNumber * 2654435761)) >>> 0;
-    const options = rollThreeRewards(wave, this.creature, seed);
-    this.rewardModal.open(wave.name, wave.waveNumber, options, (pickedDef) => {
-      this.ownedIds.add(pickedDef.id);
-      this.endBattleToLab();
-      this.equipPart(pickedDef);
-      if (this.currentWaveIdx + 1 < STAGE1_WAVES.length) {
-        this.currentWaveIdx += 1;
-      } else {
-        this.stageCleared = true;
-        this.currentWaveIdx = 0;
-        this.showToast('🎉 第 1 关通关！已保留所有掉落零件，可继续刷关冲 3 阶或试装全图鉴！', 'ok');
-      }
-      this.refresh();
-    });
-  }
-
-  private endBattleToLab(): void {
-    this.battle.stop();
-    this.rewardModal.close();
-    this.phase = 'idle';
-    this.rings.setVisible(true);
-    this.sidebar.setDisabled(false);
-    this.fightBtn.disabled = false;
-    this.battleBadge.hidden = true;
-    this.stageInfo.hidden = false;
-    this.stageFooter.hidden = false;
-    this.refresh();
-  }
-
-  /* ==========================================================================
-   * 性能 / toast / 主循环
-   * ========================================================================== */
-
-  private togglePerf(): void {
-    const open = !this.perf.isOpen;
-    this.perf.setOpen(open);
-    this.perfBtn.classList.toggle('active', open);
   }
 
   private showToast(text: string, tone: 'ok' | 'bad' | 'info' = 'info'): void {
@@ -662,14 +651,13 @@ export class App {
     this.lastFrame = now;
     const seconds = now / 1000;
 
-    if (this.phase === 'battle') {
+    if (this.screen === 'level') {
       this.battle.update(dt, now);
     }
-    this.player.update(dt, seconds, this.phase === 'battle');
-    this.enemy.update(dt, seconds, this.phase === 'battle');
+    this.player.update(dt, seconds, this.screen === 'level');
     this.scene.render(now);
     this.statsBar.update(dt);
-    if (this.phase === 'idle') {
+    if (this.screen === 'assembly') {
       this.rings.position(this.player, this.scene);
     }
     this.perf.update(this.scene.stats, countParts(this.creature), now);
@@ -680,7 +668,6 @@ export class App {
     cancelAnimationFrame(this.raf);
     this.battle.dispose();
     this.player.dispose();
-    this.enemy.dispose();
     this.scene.dispose();
     this.root.replaceChildren();
   }
