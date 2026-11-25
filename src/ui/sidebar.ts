@@ -1,7 +1,9 @@
-/** 左侧零件库（B 负责）。 */
+/**
+ * 左侧零件库（支持肉鸽闯关已获仓库 / 全件自由试装切换 + 叠阶显示 + 部位微调入口）
+ */
 
 import type { Creature, PartDef, SlotId } from '../core';
-import { PARTS_BY_SLOT, SLOT_IDS } from '../core';
+import { MAX_BODY_FUSION, PARTS_BY_SLOT, SLOT_IDS } from '../core';
 import { el, slotIcon } from './dom';
 import { t } from './strings';
 
@@ -11,33 +13,20 @@ export interface SidebarCallbacks {
   onRemove: (def: PartDef) => void;
   onClear: (slot: SlotId) => void;
   onClearAll: () => void;
+  onTweakSlot: (slot: SlotId) => void;
+  onToggleSandbox: (sandbox: boolean) => void;
 }
 
 interface Row {
   readonly def: PartDef;
   readonly root: HTMLDivElement;
-  readonly count: HTMLSpanElement;
+  readonly badge: HTMLSpanElement;
   readonly minus: HTMLButtonElement;
   readonly group: HTMLElement;
 }
 
-const SLOT_ICON: Record<SlotId, 'body' | 'beak' | 'legs' | 'wings' | 'tail' | 'crest'> = {
-  body: 'body',
-  beak: 'beak',
-  legs: 'legs',
-  wings: 'wings',
-  tail: 'tail',
-  crest: 'crest',
-};
-
-function statsText(def: PartDef): string {
-  const bits: string[] = [];
-  if (def.stats.hp) bits.push(`HP+${def.stats.hp}`);
-  if (def.stats.atk) bits.push(`ATK+${def.stats.atk}`);
-  if (def.stats.def) bits.push(`DEF+${def.stats.def}`);
-  if (def.stats.spd) bits.push(`SPD${def.stats.spd > 0 ? '+' : ''}${def.stats.spd}`);
-  if (bits.length === 0) bits.push('—');
-  return bits.join(' · ');
+function hexCss(n: number): string {
+  return `#${n.toString(16).padStart(6, '0')}`;
 }
 
 export class Sidebar {
@@ -45,50 +34,71 @@ export class Sidebar {
   private readonly rows: Row[] = [];
   private readonly groups = new Map<SlotId, HTMLElement>();
   private readonly groupCounts = new Map<SlotId, HTMLElement>();
+  private readonly titleEl: HTMLElement;
+  private readonly modeBtn: HTMLButtonElement;
   private disabled = false;
-  private readonly list: HTMLElement;
+  private sandboxMode = false;
+  private ownedIds = new Set<string>();
   private lastPointerType = 'mouse';
 
   constructor(host: HTMLElement, private readonly cb: SidebarCallbacks) {
     this.el = el('aside', 'sidebar');
+
     const head = el('div', 'sidebar-head');
     const titleWrap = el('div', 'sidebar-title-wrap');
-    titleWrap.append(el('div', 'eyebrow', t('sidebar.title')), el('h2', 'sidebar-title', '24 个零件 · 全部解锁'));
-    head.append(titleWrap);
+    this.titleEl = el('h2', 'sidebar-title', '肉鸽零件背包（0 / 36）');
+    titleWrap.append(el('div', 'eyebrow', t('sidebar.title')), this.titleEl);
+
+    const headActions = el('div', 'sidebar-head-actions');
+    this.modeBtn = el('button', 'btn ghost mode-toggle', '全件试装');
+    this.modeBtn.type = 'button';
+    this.modeBtn.title = '切换：肉鸽掉落背包 / 解锁全部 36 件自由体验';
+    this.modeBtn.addEventListener('click', () => {
+      this.sandboxMode = !this.sandboxMode;
+      this.cb.onToggleSandbox(this.sandboxMode);
+    });
+
     const clearAll = el('button', 'icon-btn ghost', '清空');
     clearAll.type = 'button';
-    clearAll.title = t('button.reset');
     clearAll.addEventListener('click', () => this.cb.onClearAll());
-    head.append(clearAll);
+    headActions.append(this.modeBtn, clearAll);
+
+    head.append(titleWrap, headActions);
     this.el.append(head);
     this.el.append(el('p', 'sidebar-hint', t('sidebar.hint')));
 
     const list = el('div', 'part-groups');
-    this.list = list;
     for (const slot of SLOT_IDS) {
       const section = el('section', `slot-section slot-${slot}`);
       const sHead = el('div', 'slot-head');
-      const icon = slotIcon(SLOT_ICON[slot]);
+      const icon = slotIcon(slot);
       const label = el('div', 'slot-label');
       label.append(
         el('span', 'slot-name', t(`slot.${slot}.full` as 'slot.body.full')),
         el('span', 'slot-key', slot.toUpperCase()),
       );
-      const count = el('span', 'slot-count', '0');
+      const count = el('span', 'slot-count', slot === 'body' ? `0/${MAX_BODY_FUSION}` : '空');
+
+      const tweakBtn = el('button', 'slot-tweak', '微调');
+      tweakBtn.type = 'button';
+      tweakBtn.title = '微调该部位 3D 位置/角度/大小（仅影响造型）';
+      tweakBtn.addEventListener('click', () => this.cb.onTweakSlot(slot));
+
       const clear = el('button', 'slot-clear', '清空');
       clear.type = 'button';
       clear.addEventListener('click', () => this.cb.onClear(slot));
-      sHead.append(icon, label, count, clear);
+
+      sHead.append(icon, label, count, tweakBtn, clear);
       section.append(sHead);
 
       for (const def of PARTS_BY_SLOT[slot]) {
-        const row = this.makeRow(def, section);
-        this.rows.push(row);
+        this.rows.push(this.makeRow(def, section));
       }
       this.groups.set(slot, section);
       this.groupCounts.set(slot, count);
       list.append(section);
     }
+
     this.el.append(list);
     host.append(this.el);
   }
@@ -99,109 +109,115 @@ export class Sidebar {
     root.dataset.def = def.id;
     root.dataset.slot = def.slot;
     root.setAttribute('role', 'button');
-    root.setAttribute('aria-label', `${def.name.zh}，${t('sidebar.add')}`);
 
-    const icon = slotIcon(SLOT_ICON[def.slot]);
+    const swatch = el('span', 'part-swatch');
+    swatch.style.background = `linear-gradient(135deg, ${hexCss(def.art.color)}, ${hexCss(def.art.accentColor)})`;
+
     const main = el('div', 'part-main');
     const nameRow = el('div', 'part-name-row');
     const name = el('span', 'part-name', def.name.zh);
-    const tier = el('span', 'part-tier', `T${def.tier}`);
-    nameRow.append(name, tier);
-    const meta = el('div', 'part-meta');
-    meta.append(
-      el('span', 'part-mass', t('sidebar.mass', { n: def.mass })),
-      el('span', 'part-dot', '·'),
-      el('span', 'part-stats', statsText(def)),
-    );
+    const themeTag = el('span', `part-theme ${def.theme}`, def.theme === 'mech' ? '机械' : '动物');
+    nameRow.append(name, themeTag);
+    const meta = el('div', 'part-meta', def.role);
     main.append(nameRow, meta);
 
     const side = el('div', 'part-side');
-    const grip = el('button', 'part-drag', '⠿');
-    grip.type = 'button';
-    grip.title = '拖到槽位环';
-    grip.setAttribute('aria-label', `拖动 ${def.name.zh} 到槽位环`);
-    grip.addEventListener('pointerdown', (e) => {
-      if (this.disabled) return;
-      e.preventDefault();
-      e.stopPropagation();
-      this.lastPointerType = e.pointerType;
-      this.cb.onPartPointerDown(def, e);
-    });
-    const count = el('span', 'part-count', '0');
+    const badge = el('span', 'part-count', '—');
     const minus = el('button', 'part-minus', '−');
     minus.type = 'button';
     minus.title = t('sidebar.remove');
-    minus.setAttribute('aria-label', `${t('sidebar.remove')} ${def.name.zh}`);
     minus.addEventListener('pointerdown', (e) => e.stopPropagation());
     minus.addEventListener('click', (e) => {
       e.stopPropagation();
       this.cb.onRemove(def);
     });
-    side.append(grip, count, minus);
-    root.append(icon, main, side);
+    side.append(badge, minus);
+    root.append(swatch, main, side);
 
     root.addEventListener('pointerdown', (e) => {
-      if (this.disabled) return;
+      if (this.disabled || root.classList.contains('locked')) return;
       const target = e.target as HTMLElement;
       if (target.closest('button')) return;
       if (e.button !== 0) return;
       this.lastPointerType = e.pointerType;
-      // 触屏：卡片区域留给纵向滚动；拖拽请用右侧 ⠿ 手柄。
       if (e.pointerType !== 'mouse') return;
       e.preventDefault();
       this.cb.onPartPointerDown(def, e);
     });
     root.addEventListener('click', (e) => {
-      if (this.disabled) return;
+      if (this.disabled || root.classList.contains('locked')) return;
       const target = e.target as HTMLElement;
       if (target.closest('button')) return;
       if (this.lastPointerType === 'mouse') return;
       this.cb.onAdd(def);
     });
     root.addEventListener('keydown', (e) => {
-      if (this.disabled) return;
+      if (this.disabled || root.classList.contains('locked')) return;
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
         this.cb.onAdd(def);
       }
     });
 
-    root.addEventListener('contextmenu', (e) => e.preventDefault());
     group.append(root);
-    return { def, root, count, minus, group };
+    return { def, root, badge, minus, group };
   }
 
-  setCreature(creature: Creature): void {
-    this.list.scrollLeft = 0;
-    const perDef = new Map<string, number>();
-    const perSlot = new Map<SlotId, number>();
+  setState(creature: Creature, ownedIds: ReadonlySet<string>, sandboxMode: boolean): void {
+    this.sandboxMode = sandboxMode;
+    this.ownedIds = new Set(ownedIds);
+
+    this.modeBtn.textContent = sandboxMode ? '回肉鸽背包' : '全件试装';
+    this.modeBtn.classList.toggle('active', sandboxMode);
+    this.titleEl.textContent = sandboxMode
+      ? '全件自由试装（36 件全开）'
+      : `肉鸽背包（已获 ${this.ownedIds.size} / 36）`;
+
+    const levelByDef = new Map<string, number>();
+    for (const slot of SLOT_IDS) {
+      for (const inst of creature.slots[slot]) {
+        levelByDef.set(inst.defId, inst.level);
+      }
+    }
+
+    for (const row of this.rows) {
+      const lv = levelByDef.get(row.def.id) ?? 0;
+      const unlocked = sandboxMode || this.ownedIds.has(row.def.id) || lv > 0;
+      row.root.classList.toggle('locked', !unlocked);
+      row.root.classList.toggle('installed', lv > 0);
+      row.root.classList.toggle('lv2', lv === 2);
+      row.root.classList.toggle('lv3', lv >= 3);
+
+      if (!unlocked) {
+        row.badge.textContent = '🔒';
+        row.minus.style.visibility = 'hidden';
+      } else if (lv > 0) {
+        row.badge.textContent = `Lv.${lv}`;
+        row.minus.style.visibility = 'visible';
+        row.minus.disabled = false;
+      } else {
+        row.badge.textContent = '+';
+        row.minus.style.visibility = 'hidden';
+      }
+    }
+
     for (const slot of SLOT_IDS) {
       const list = creature.slots[slot];
-      perSlot.set(slot, list.length);
-      for (const instance of list) perDef.set(instance.defId, (perDef.get(instance.defId) ?? 0) + 1);
-    }
-    for (const row of this.rows) {
-      const count = perDef.get(row.def.id) ?? 0;
-      row.count.textContent = String(count);
-      row.root.classList.toggle('installed', count > 0);
-      row.minus.disabled = count <= 0;
-      row.minus.style.visibility = count > 0 ? 'visible' : 'hidden';
-      row.root.setAttribute('aria-label', `${row.def.name.zh}，已装 ${count}，${t('sidebar.add')}`);
-    }
-    for (const slot of SLOT_IDS) {
       const countEl = this.groupCounts.get(slot);
-      if (countEl) countEl.textContent = String(perSlot.get(slot) ?? 0);
+      if (countEl) {
+        if (slot === 'body') {
+          countEl.textContent = `${list.length}/${MAX_BODY_FUSION}`;
+        } else {
+          countEl.textContent = list[0] ? `Lv.${list[0].level}` : '空';
+        }
+      }
       const section = this.groups.get(slot);
-      if (section) section.classList.toggle('has-parts', (perSlot.get(slot) ?? 0) > 0);
+      if (section) section.classList.toggle('has-parts', list.length > 0);
     }
   }
 
   setDisabled(disabled: boolean): void {
     this.disabled = disabled;
     this.el.classList.toggle('disabled', disabled);
-  }
-
-  refreshLanguage(): void {
-    // 当前结构预留；M0 不接切换
   }
 }

@@ -1,16 +1,8 @@
 /**
- * 属性推导（A 负责）
+ * 属性与组合推导（纯函数）
  * ---------------------------------------------------------------
- * 纯函数：Creature + 配置表 + 协同规则 → CreatureStats。
- * 不读取存档、不写全局、不依赖时间/随机。
- *
- * 数值模型（M0，可调）：
- *   HP   = 20 + Σ 部件 hp + 躯干 hp（躯干加成翻倍）
- *   ATK  = Σ 部件 atk + 喙 atk（喙加成翻倍）
- *   DEF  = Σ 部件 def
- *   SPD  = clamp(100 + Σ spd*4, 20, 400) × (1 - clamp(mass/capacity, 0, 0.6))
- *   capacity = 8 + Σ 躯干 size*4
- * 然后按 SYNERGIES 顺序应用 grantTag / statMul / statAdd / unlockAbility。
+ * Creature + 配置表 + 特殊组合规则 → CreatureStats & SynergyNote[]。
+ * 造型微调（creature.tweaks）严格不参与数值推导（P-006, P-028）。
  */
 
 import type {
@@ -26,9 +18,11 @@ import type {
 } from './types';
 import { SLOT_IDS } from './types';
 
-export const BASE_HP = 20;
-export const BASE_CAPACITY = 8;
-export const LEVEL_SCALE = [1, 1.25, 1.5] as const;
+export const BASE_HP = 30;
+export const BASE_ATK = 4;
+export const BASE_CAPACITY = 10;
+/** 1 阶基础 / 2 阶变色强化 / 3 阶满级粒子觉醒（P-026）。 */
+export const LEVEL_SCALE = [1, 1.35, 1.75] as const;
 
 const STAT_KEYS: readonly (keyof Stats)[] = ['hp', 'atk', 'def', 'spd'];
 
@@ -45,7 +39,6 @@ interface Resolved {
   notes: SynergyNote[];
 }
 
-/** 单次求值：基础属性 → 协同规则 → flags。 */
 function resolve(
   creature: Creature,
   defs: readonly PartDef[],
@@ -55,7 +48,9 @@ function resolve(
 
   const totals: Stats = { hp: 0, atk: 0, def: 0, spd: 0 };
   const tags = new Set<string>();
+  const traits = new Set<string>();
   const abilities = new Set<AbilityId>();
+  const allIds = new Set<string>();
   const slotCounts: Record<SlotId, number> = {
     body: 0,
     beak: 0,
@@ -77,6 +72,7 @@ function resolve(
   let bodySize = 0;
   let bodyHp = 0;
   let beakAtk = 0;
+  let hasAirHitPart = false;
 
   for (const slot of SLOT_IDS) {
     const instances: readonly PartInstance[] = creature.slots[slot] ?? [];
@@ -87,7 +83,9 @@ function resolve(
 
       slotCounts[slot] += 1;
       slotIds[slot].add(def.id);
+      allIds.add(def.id);
       mass += def.mass;
+
       if (slot === 'body') {
         bodySize += def.size;
         bodyHp += Math.round((def.stats.hp ?? 0) * scale);
@@ -95,41 +93,57 @@ function resolve(
       if (slot === 'beak') {
         beakAtk += Math.round((def.stats.atk ?? 0) * scale);
       }
+      if (def.canHitAir) hasAirHitPart = true;
 
       for (const key of STAT_KEYS) {
         const increment = def.stats[key] ?? 0;
         totals[key] += Math.round(increment * scale);
       }
       for (const tag of def.tags) tags.add(tag);
+      for (const tr of def.traits) traits.add(tr);
       if (def.ability) abilities.add(def.ability);
     }
   }
 
   const capacity = BASE_CAPACITY + bodySize * 4;
-  const massRatio = capacity > 0 ? clamp(mass / capacity, 0, 0.6) : 0.6;
+  const massRatio = capacity > 0 ? clamp(mass / (capacity * 1.4), 0, 0.55) : 0.55;
+
+  // 黄金王冠光环加成（P-024）
+  const crownMul = traits.has('crown_aura') ? 1.15 : 1;
 
   const stats: CreatureStats = {
     v: 1,
-    hp: BASE_HP + totals.hp + bodyHp,
-    atk: totals.atk + beakAtk,
-    def: totals.def,
-    spd: clamp(Math.round((100 + totals.spd * 4) * (1 - massRatio)), 5, 400),
+    hp: Math.round((BASE_HP + totals.hp + Math.round(bodyHp * 0.5)) * crownMul),
+    atk: Math.round((BASE_ATK + totals.atk + Math.round(beakAtk * 0.5)) * crownMul),
+    def: Math.round(totals.def * crownMul),
+    spd: clamp(Math.round((100 + totals.spd * 4) * (1 - massRatio)), 25, 320),
     mass,
     capacity,
     tags: [],
+    traits: [],
+    combos: [],
     abilities: [],
-    flags: { grounded: false, canGlide: false, overloaded: false },
+    flags: {
+      grounded: false,
+      canGlide: false,
+      overloaded: false,
+      canJump: false,
+      canHitAir: false,
+    },
   };
 
   const notes: SynergyNote[] = [];
+  const combos: string[] = [];
 
   const applyEffect = (effect: SynergyRule['effect']): void => {
     switch (effect.type) {
       case 'grantTag':
         tags.add(effect.tag);
         break;
+      case 'grantTrait':
+        traits.add(effect.trait);
+        break;
       case 'statMul': {
-        // 用 1/1000 定点做倍率，避免 90 * 1.15 = 103.4999... 这类浮点误差。
         const milli = Math.round(effect.mul * 1000);
         stats[effect.stat] = Math.round((stats[effect.stat] * milli) / 1000);
         break;
@@ -150,6 +164,7 @@ function resolve(
   const matchRule = (rule: SynergyRule): boolean => {
     const when = rule.when;
     if (when.tags && !when.tags.every((tag) => tags.has(tag))) return false;
+
     if (when.slots) {
       for (const slot of SLOT_IDS) {
         const prefix = when.slots[slot];
@@ -164,8 +179,34 @@ function resolve(
         if (!hit) return false;
       }
     }
+
+    if (when.slotAnyIds) {
+      for (const slot of SLOT_IDS) {
+        const candidates = when.slotAnyIds[slot];
+        if (!candidates || candidates.length === 0) continue;
+        let hit = false;
+        for (const id of candidates) {
+          if (slotIds[slot].has(id)) {
+            hit = true;
+            break;
+          }
+        }
+        if (!hit) return false;
+      }
+    }
+
+    if (when.bodyFusionAll) {
+      for (const reqId of when.bodyFusionAll) {
+        if (!slotIds.body.has(reqId)) return false;
+      }
+    }
+
+    if (when.anyIds && !when.anyIds.some((id) => allIds.has(id))) return false;
+    if (when.anyIds2 && !when.anyIds2.some((id) => allIds.has(id))) return false;
+
     if (when.minMass !== undefined && mass < when.minMass) return false;
     if (when.maxMass !== undefined && mass > when.maxMass) return false;
+
     if (when.minCount) {
       for (const slot of SLOT_IDS) {
         const min = when.minCount[slot];
@@ -186,21 +227,27 @@ function resolve(
     applyEffect(rule.effect);
     for (const extra of rule.extraEffects ?? []) applyEffect(extra);
     notes.push({ ruleId: rule.id, tone: rule.ui.tone, text: rule.ui.text });
+    combos.push(rule.id);
   }
 
-  const hasWing = tags.has('wing');
+  const hasBioWing = tags.has('bio_wing');
+  const hasJet = traits.has('jet_boost');
   const overloaded = mass > capacity;
-  const grounded = tags.has('grounded') || (hasWing && overloaded);
-  const canGlide = tags.has('glide') && !grounded;
+  // 喷气推进翼无视超重强行浮空；生物翼超重或触发太沉冲突则 grounded
+  const grounded = !hasJet && (tags.has('grounded') || (hasBioWing && overloaded));
+  const canGlide = (traits.has('glide') || tags.has('glide')) && !grounded;
+  const canJump = traits.has('jump') || tags.has('jump');
+  const canHitAir = hasAirHitPart || traits.has('anti_air');
 
   stats.tags = [...tags].sort();
+  stats.traits = [...traits].sort();
+  stats.combos = combos;
   stats.abilities = [...abilities].sort();
-  stats.flags = { grounded, canGlide, overloaded };
+  stats.flags = { grounded, canGlide, overloaded, canJump, canHitAir };
 
   return { stats, notes };
 }
 
-/** 纯函数：推导最终属性。 */
 export function deriveStats(
   creature: Creature,
   defs: readonly PartDef[],
@@ -209,7 +256,6 @@ export function deriveStats(
   return resolve(creature, defs, synergies).stats;
 }
 
-/** 纯函数：本次装配触发了哪些协同/冲突（UI 的 chip 用）。 */
 export function synergyNotes(
   creature: Creature,
   defs: readonly PartDef[],

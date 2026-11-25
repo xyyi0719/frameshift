@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  MAX_PARTS,
+  MAX_BODY_FUSION,
+  MAX_PART_LEVEL,
   PART_DEFS,
   SYNERGIES,
   applyEdit,
@@ -9,163 +10,106 @@ import {
   createCreature,
   deriveStats,
 } from '../src/core';
-import type { PartInstance } from '../src/core';
 
-describe('assembly / applyEdit', () => {
-  it('createCreature：六个空槽、stage 3、可改皮肤', () => {
-    const creature = createCreature('chick-1');
-    expect(creature.v).toBe(1);
-    expect(creature.id).toBe('chick-1');
-    expect(creature.stage).toBe(3);
-    expect(Object.keys(creature.slots).sort()).toEqual(
-      ['beak', 'body', 'crest', 'legs', 'tail', 'wings'],
-    );
-    expect(countParts(creature)).toBe(0);
+describe('assembly / applyEdit（双 3 上限、分部位融合、精简版微调）', () => {
+  it('同件重复装配自动叠强 1→2→3 阶，满 3 阶返回 max_level', () => {
+    let c = createCreature('chick-1');
+    const r1 = applyEdit(c, { type: 'equipOrUpgrade', slot: 'legs', defId: 'legs.frog' });
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    expect(r1.action).toBe('equipped');
+    expect(r1.creature.slots.legs).toEqual([{ defId: 'legs.frog', level: 1 }]);
+    c = r1.creature;
 
-    const skinned = createCreature('chick-2', 3, 'gold');
-    expect(skinned.skin).toBe('gold');
+    const r2 = applyEdit(c, { type: 'equipOrUpgrade', slot: 'legs', defId: 'legs.frog' });
+    expect(r2.ok && r2.action === 'upgraded').toBe(true);
+    if (!r2.ok) return;
+    expect(r2.creature.slots.legs[0].level).toBe(2);
+    c = r2.creature;
+
+    const r3 = applyEdit(c, { type: 'equipOrUpgrade', slot: 'legs', defId: 'legs.frog' });
+    expect(r3.ok && r3.action === 'upgraded').toBe(true);
+    if (!r3.ok) return;
+    expect(r3.creature.slots.legs[0].level).toBe(MAX_PART_LEVEL);
+    expect(r3.stats.spd).toBeGreaterThan(r1.stats.spd);
+    c = r3.creature;
+
+    const r4 = applyEdit(c, { type: 'equipOrUpgrade', slot: 'legs', defId: 'legs.frog' });
+    expect(r4.ok).toBe(false);
+    if (!r4.ok) expect(r4.code).toBe('max_level');
   });
 
-  it('addPart：返回新对象、旧对象不变、stats 同步', () => {
-    const before = createCreature();
-    const result = applyEdit(before, { type: 'addPart', slot: 'body', defId: 'body.basic' });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
+  it('非躯干部位换不同零件时直接替换主轮廓，保持实体清晰（P-027）', () => {
+    let c = createCreature();
+    const r1 = applyEdit(c, { type: 'equipOrUpgrade', slot: 'beak', defId: 'beak.croc' });
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    c = r1.creature;
 
-    expect(before.slots.body).toHaveLength(0);
-    expect(result.creature.slots.body).toEqual([{ defId: 'body.basic', level: 1 }]);
-    expect(result.creature).not.toBe(before);
-    expect(result.stats).toEqual(deriveStats(result.creature, PART_DEFS, SYNERGIES));
-    expect(result.stats.hp).toBe(32);
-    expect(result.notes).toEqual([]);
+    const r2 = applyEdit(c, { type: 'equipOrUpgrade', slot: 'beak', defId: 'beak.cannon' });
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    expect(r2.action).toBe('replaced');
+    expect(r2.creature.slots.beak).toEqual([{ defId: 'beak.cannon', level: 1 }]);
   });
 
-  it('M0 不校验容量：连续装 10 条腿仍然 ok', () => {
-    let creature = createCreature();
-    for (let i = 0; i < 10; i += 1) {
-      const result = applyEdit(creature, {
-        type: 'addPart',
-        slot: 'legs',
-        defId: 'legs.spring',
-      });
-      expect(result.ok).toBe(true);
-      if (!result.ok) return;
-      creature = result.creature;
+  it(`躯干支持最多 ${MAX_BODY_FUSION} 种异件拼色融合，满上限返回 fusion_full（P-025, P-026）`, () => {
+    let c = createCreature();
+    for (const id of ['body.turtle', 'body.hedgehog', 'body.puffer']) {
+      const r = applyEdit(c, { type: 'equipOrUpgrade', slot: 'body', defId: id });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      c = r.creature;
     }
-    expect(countParts(creature)).toBe(10);
-    expect(creature.slots.legs).toHaveLength(10);
-    expect(deriveStats(creature, PART_DEFS, SYNERGIES).flags.overloaded).toBe(true);
+    expect(c.slots.body).toHaveLength(3);
+
+    const blocked = applyEdit(c, { type: 'equipOrUpgrade', slot: 'body', defId: 'body.swift' });
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.code).toBe('fusion_full');
+
+    // 满 3 种时，给已融合的乌龟壳继续叠阶仍然允许
+    const up = applyEdit(c, { type: 'equipOrUpgrade', slot: 'body', defId: 'body.turtle' });
+    expect(up.ok).toBe(true);
+    if (!up.ok) return;
+    expect(up.creature.slots.body[0].level).toBe(2);
   });
 
-  it('未知零件 / 放错槽位 → incompatible', () => {
-    const creature = createCreature();
-    const unknown = applyEdit(creature, {
-      type: 'addPart',
+  it('downgradePart 逐阶降级，降到 0 自动卸下并清理微调', () => {
+    let c = createCreature();
+    const r1 = applyEdit(c, { type: 'equipOrUpgrade', slot: 'crest', defId: 'crest.rhino' });
+    if (!r1.ok) return;
+    const r2 = applyEdit(r1.creature, { type: 'equipOrUpgrade', slot: 'crest', defId: 'crest.rhino' });
+    if (!r2.ok) return;
+    c = r2.creature;
+
+    const d1 = applyEdit(c, { type: 'downgradePart', slot: 'crest', defId: 'crest.rhino' });
+    expect(d1.ok && d1.action === 'downgraded').toBe(true);
+    if (!d1.ok) return;
+    expect(d1.creature.slots.crest[0].level).toBe(1);
+
+    const d2 = applyEdit(d1.creature, { type: 'downgradePart', slot: 'crest', defId: 'crest.rhino' });
+    expect(d2.ok && d2.action === 'removed').toBe(true);
+    if (!d2.ok) return;
+    expect(d2.creature.slots.crest).toHaveLength(0);
+    expect(countParts(d2.creature)).toBe(0);
+  });
+
+  it('部位内精简版造型微调只改外观，绝对不影响战斗数值（P-006, P-028）', () => {
+    const r1 = applyEdit(createCreature(), { type: 'equipOrUpgrade', slot: 'body', defId: 'body.turtle' });
+    if (!r1.ok) return;
+    const beforeStats = deriveStats(r1.creature, PART_DEFS, SYNERGIES);
+
+    const tweaked = applyEdit(r1.creature, {
+      type: 'setTweak',
       slot: 'body',
-      defId: 'nope.part',
+      tweak: { offset: [0.3, -0.2, 0.1], rotation: [10, 20, -15], scale: 1.3 },
     });
-    expect(unknown.ok).toBe(false);
-    if (!unknown.ok) expect(unknown.code).toBe('incompatible');
+    expect(tweaked.ok).toBe(true);
+    if (!tweaked.ok) return;
+    expect(tweaked.stats).toEqual(beforeStats);
+    expect(tweaked.creature.tweaks?.body?.scale).toBe(1.3);
 
-    const wrongSlot = applyEdit(creature, {
-      type: 'addPart',
-      slot: 'legs',
-      defId: 'body.basic',
-    });
-    expect(wrongSlot.ok).toBe(false);
-    if (!wrongSlot.ok) expect(wrongSlot.code).toBe('incompatible');
-  });
-
-  it('removePart / clearSlot：删除指定实例或整槽清空', () => {
-    const creature = createCreature();
-    creature.slots.legs = [
-      { defId: 'legs.spring', level: 1 },
-      { defId: 'legs.claw', level: 1 },
-      { defId: 'legs.runner', level: 1 },
-    ];
-
-    const removed = applyEdit(creature, { type: 'removePart', slot: 'legs', index: 1 });
-    expect(removed.ok).toBe(true);
-    if (!removed.ok) return;
-    expect(removed.creature.slots.legs.map((p) => p.defId)).toEqual([
-      'legs.spring',
-      'legs.runner',
-    ]);
-    expect(creature.slots.legs).toHaveLength(3);
-
-    const cleared = applyEdit(creature, { type: 'clearSlot', slot: 'legs' });
-    expect(cleared.ok).toBe(true);
-    if (!cleared.ok) return;
-    expect(cleared.creature.slots.legs).toEqual([]);
-
-    const bad = applyEdit(creature, { type: 'removePart', slot: 'legs', index: 9 });
-    expect(bad.ok).toBe(false);
-    if (!bad.ok) expect(bad.code).toBe('incompatible');
-  });
-
-  it('upgrade：等级 1→2→3，属性提升；到顶返回 incompatible', () => {
-    const creature = createCreature();
-    creature.slots.body = [{ defId: 'body.basic', level: 1 }];
-
-    const level2 = applyEdit(creature, { type: 'upgrade', slot: 'body', index: 0 });
-    expect(level2.ok).toBe(true);
-    if (!level2.ok) return;
-    expect(level2.creature.slots.body[0].level).toBe(2);
-
-    const level3 = applyEdit(level2.creature, { type: 'upgrade', slot: 'body', index: 0 });
-    expect(level3.ok).toBe(true);
-    if (!level3.ok) return;
-    expect(level3.creature.slots.body[0].level).toBe(3);
-    expect(level3.stats.hp).toBe(38); // 20 + 9 + 躯干 9
-
-    const cap = applyEdit(level3.creature, { type: 'upgrade', slot: 'body', index: 0 });
-    expect(cap.ok).toBe(false);
-    if (!cap.ok) expect(cap.code).toBe('incompatible');
-    expect(creature.slots.body[0].level).toBe(1);
-  });
-
-  it('changeSkin 只改皮肤', () => {
-    const creature = createCreature();
-    const result = applyEdit(creature, { type: 'changeSkin', skin: 'neon' });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.creature.skin).toBe('neon');
-    expect(result.creature.slots).toEqual(creature.slots);
-  });
-
-  it(`硬上限 ${MAX_PARTS}：装满后 addPart → too_many，删掉一个后可再装`, () => {
-    const full = createCreature();
-    full.slots.legs = Array.from({ length: MAX_PARTS }, (): PartInstance => ({
-      defId: 'legs.runner',
-      level: 1,
-    }));
-    expect(countParts(full)).toBe(MAX_PARTS);
-
-    const blocked = applyEdit(full, { type: 'addPart', slot: 'body', defId: 'body.basic' });
-    expect(blocked).toEqual({ ok: false, code: 'too_many', detail: expect.any(String) });
-
-    const removed = applyEdit(full, { type: 'removePart', slot: 'legs', index: 0 });
-    expect(removed.ok).toBe(true);
-    if (!removed.ok) return;
-    const added = applyEdit(removed.creature, {
-      type: 'addPart',
-      slot: 'body',
-      defId: 'body.basic',
-    });
-    expect(added.ok).toBe(true);
-  });
-
-  it('cloneCreature 是深拷贝；失败结果不污染输入', () => {
-    const creature = createCreature();
-    creature.slots.legs = [{ defId: 'legs.spring', level: 1 }];
-    const clone = cloneCreature(creature);
-    clone.slots.legs[0].level = 3;
-    clone.slots.legs.push({ defId: 'legs.claw', level: 1 });
-    expect(creature.slots.legs).toHaveLength(1);
-    expect(creature.slots.legs[0].level).toBe(1);
-
-    const snapshot = JSON.stringify(creature);
-    applyEdit(creature, { type: 'addPart', slot: 'body', defId: 'unknown' });
-    expect(JSON.stringify(creature)).toBe(snapshot);
+    const copy = cloneCreature(tweaked.creature);
+    expect(copy.tweaks).toEqual(tweaked.creature.tweaks);
   });
 });

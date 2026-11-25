@@ -1,13 +1,15 @@
 /**
- * 小鸡 base rig + 零件实例（B 负责）。
+ * 小鸡 3D 模型（固定呆萌小鸡头 + 可组装动物/机械六部位 + 3D 立体跳跃与朝向）
  * ---------------------------------------------------------------
- * 节点与比例按 docs/RIG3D.md §2；零件布局只消费 core 的 PlacedPart[]。
+ * - 保留固定鸡头与眼睛作为辨识锚点（P-011）；
+ * - 装上躯干零件后隐藏裸鸡圆球，展示 1 / 1/2 / 1/3 拼色融合躯干（P-025）；
+ * - 支持 3D 高度 worldY、左右翻转朝向 facing、受击抖动与攻击前冲！
  */
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import type { PartDef, PlacedPart, SlotId } from '../core';
-import { PART_BY_ID } from '../core';
+import type { Creature, PartDef, PartInstance, PlacedPart, SlotId } from '../core';
+import { PART_BY_ID, layoutCreature } from '../core';
 import {
   chickBaseBeakGeometry,
   chickBaseLegGeometry,
@@ -22,17 +24,13 @@ import {
 import { createBlobShadow, getGlowSpriteTexture, materialForKind, outlineMaterial, toonMaterial } from './materials';
 import { PartBatches } from './parts';
 
-const DEG = Math.PI / 180;
-
-
-/** 槽位环锚点（base rig 局部坐标；UI 投影到屏幕）。 */
 export const SLOT_ANCHORS: Record<SlotId, readonly [number, number, number]> = {
   body: [0, 1.12, 0],
   beak: [1.5, 1.68, 0],
-  legs: [0.05, 0.6, 0.72],
+  legs: [0.05, 0.56, 0.72],
   wings: [-0.05, 1.42, -0.82],
-  tail: [-1.55, 1.18, 0],
-  crest: [0.74, 2.12, 0],
+  tail: [-1.45, 1.18, 0],
+  crest: [0.74, 2.22, 0],
 };
 
 const tmpWorld = new THREE.Vector3();
@@ -51,16 +49,17 @@ function outlined(
 
 export interface ChickOptions {
   variant?: 'player' | 'enemy';
+  headColor?: number;
 }
 
-/**
- * 一只鸡。root 放在世界地面 (x,0,z)，内部 base rig 抬到 y=1.02。
- */
 export class ChickModel {
   readonly root = new THREE.Group();
   readonly rig = new THREE.Group();
   readonly shadow: THREE.Mesh;
   private readonly bodyMesh: THREE.Mesh;
+  private readonly bodyHull: THREE.Mesh;
+  private readonly tailStumpMesh: THREE.Mesh;
+  private readonly tailStumpHull: THREE.Mesh;
   private readonly head = new THREE.Group();
   private readonly eyes: THREE.Mesh[] = [];
   private readonly eyeGlints: THREE.Mesh[] = [];
@@ -80,19 +79,20 @@ export class ChickModel {
   };
 
   private worldX = 0;
+  private worldY = 0;
   private worldZ = 0;
+  private facing: 1 | -1 = 1;
+  private currentYaw = 0;
   private lunge = 0;
   private moving = false;
   private downTarget = 0;
   private down = 0;
   private hitAt = -10;
   private now = 0;
-  private clock = 0;
-  private lastBatchTick = -1;
 
   constructor(opts: ChickOptions = {}) {
     const enemy = opts.variant === 'enemy';
-    const feather = enemy ? 0xe58e6d : 0xffd24a;
+    const feather = opts.headColor ?? (enemy ? 0xeb926e : 0xffd24a);
     const bodyMat = toonMaterial({ color: feather });
     const headMat = toonMaterial({ color: feather });
     const legMat = materialForKind('bone');
@@ -110,36 +110,43 @@ export class ChickModel {
     neckGeo.dispose();
     const body = outlined(this.rig, bodyCombined, bodyMat);
     this.bodyMesh = body.mesh;
+    this.bodyHull = body.hull;
 
-    this.head.position.set(0.8, 1.70, 0);
+    // 固定小鸡头 + 呆萌眼睛（P-011 永远保留）
+    this.head.position.set(0.8, 1.7, 0);
     this.rig.add(this.head);
     outlined(this.head, chickHeadGeometry(), headMat);
 
-    const eyeA = chickEyeGeometry().translate(0.34, 0.06, -0.215);
-    const eyeB = chickEyeGeometry().translate(0.34, 0.06, 0.215);
+    const eyeA = chickEyeGeometry().translate(0.35, 0.06, -0.22);
+    const eyeB = chickEyeGeometry().translate(0.35, 0.06, 0.22);
     const eyeGeo = mergeGeometries([eyeA, eyeB], false) ?? eyeA;
-    eyeA.dispose(); eyeB.dispose();
+    eyeA.dispose();
+    eyeB.dispose();
     const eye = new THREE.Mesh(eyeGeo, eyeMat);
     this.head.add(eye);
     this.eyes.push(eye);
+
     const glintMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-    const gA = chickGlintGeometry().translate(0.375, 0.078, -0.013);
-    const gB = chickGlintGeometry().translate(0.375, 0.078, 0.013);
+    const gA = chickGlintGeometry().translate(0.39, 0.08, -0.205);
+    const gB = chickGlintGeometry().translate(0.39, 0.08, 0.205);
     const glintGeo = mergeGeometries([gA, gB], false) ?? gA;
-    gA.dispose(); gB.dispose();
+    gA.dispose();
+    gB.dispose();
     const glint = new THREE.Mesh(glintGeo, glintMat);
     this.head.add(glint);
     this.eyeGlints.push(glint);
 
-    // 尾桩
+    // 尾桩（装了尾巴零件后隐藏）
     const stump = outlined(this.rig, chickTailStumpGeometry(), bodyMat);
     stump.mesh.position.set(-0.58, 1.12, 0);
     stump.hull.position.copy(stump.mesh.position);
+    this.tailStumpMesh = stump.mesh;
+    this.tailStumpHull = stump.hull;
 
-    // 默认小喙/小脚：有对应零件时隐藏，保证裸鸡也像鸡
+    // 默认小喙/小脚（有对应零件时隐藏）
     const beakGeo = chickBaseBeakGeometry();
     this.baseBeak = new THREE.Mesh(beakGeo, materialForKind('bone'));
-    this.baseBeak.position.set(1.14, 1.68, 0);
+    this.baseBeak.position.set(1.14, 1.66, 0);
     this.baseBeakHull = new THREE.Mesh(makeOutlineGeometry(beakGeo), outlineMaterial());
     this.baseBeakHull.position.copy(this.baseBeak.position);
     this.rig.add(this.baseBeak, this.baseBeakHull);
@@ -147,7 +154,8 @@ export class ChickModel {
     const legA = chickBaseLegGeometry().translate(0.05, 0.68, -0.24);
     const legB = chickBaseLegGeometry().translate(0.05, 0.68, 0.24);
     const legGeo = mergeGeometries([legA, legB], false) ?? legA;
-    legA.dispose(); legB.dispose();
+    legA.dispose();
+    legB.dispose();
     this.baseLeg = new THREE.Mesh(legGeo, legMat);
     this.baseLegHull = new THREE.Mesh(makeOutlineGeometry(legGeo), outlineMaterial());
     this.rig.add(this.baseLeg, this.baseLegHull);
@@ -157,7 +165,7 @@ export class ChickModel {
     for (const slot of Object.keys(SLOT_ANCHORS) as SlotId[]) {
       const mat = new THREE.SpriteMaterial({
         map: getGlowSpriteTexture(),
-        color: 0xffffff,
+        color: 0x7bffdf,
         transparent: true,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
@@ -166,17 +174,22 @@ export class ChickModel {
       const sprite = new THREE.Sprite(mat);
       const a = SLOT_ANCHORS[slot];
       sprite.position.set(a[0], a[1], a[2]);
-      sprite.scale.set(0.8, 0.8, 0.8);
+      sprite.scale.set(0.85, 0.85, 0.85);
       sprite.visible = false;
       this.rig.add(sprite);
       this.flashes.set(slot, { sprite, at: -10 });
     }
-    this.shadow = createBlobShadow(1.55);
+    this.shadow = createBlobShadow(1.65);
   }
 
-  setWorld(x: number, z = 0): void {
+  setWorld(x: number, y = 0, z = 0): void {
     this.worldX = x;
+    this.worldY = Math.max(0, y);
     this.worldZ = z;
+  }
+
+  setFacing(dir: 1 | -1): void {
+    this.facing = dir;
   }
 
   setLunge(dx: number): void {
@@ -202,28 +215,49 @@ export class ChickModel {
     f.sprite.visible = true;
   }
 
-  setLayout(placements: readonly PlacedPart[], byId: Readonly<Record<string, PartDef>> = PART_BY_ID): void {
+  setCreature(creature: Creature, byId: Readonly<Record<string, PartDef>> = PART_BY_ID): void {
+    const placements = layoutCreature(creature);
+    this.setLayout(placements, byId, creature.slots.body);
+  }
+
+  setLayout(
+    placements: readonly PlacedPart[],
+    byId: Readonly<Record<string, PartDef>> = PART_BY_ID,
+    bodyInstances: readonly PartInstance[] = [],
+  ): void {
     for (const slot of Object.keys(this.counts) as SlotId[]) this.counts[slot] = 0;
     for (const p of placements) {
       const def = byId[p.defId];
       if (def) this.counts[def.slot] += 1;
     }
-    this.batches.sync(placements, byId, this.now);
+    if (bodyInstances.length > 0) this.counts.body = bodyInstances.length;
+
+    this.batches.sync(placements, byId, this.now, bodyInstances);
+
+    const hasBody = this.counts.body > 0;
+    this.bodyMesh.visible = !hasBody;
+    this.bodyHull.visible = !hasBody;
+
     const hasBeak = this.counts.beak > 0;
     this.baseBeak.visible = !hasBeak;
     this.baseBeakHull.visible = !hasBeak;
+
     const hasLegs = this.counts.legs > 0;
     this.baseLeg.visible = !hasLegs;
     this.baseLegHull.visible = !hasLegs;
+
+    const hasTail = this.counts.tail > 0;
+    this.tailStumpMesh.visible = !hasTail;
+    this.tailStumpHull.visible = !hasTail;
   }
 
   update(dt: number, now: number, battle: boolean): void {
     this.now = now;
-    this.clock = now;
-    void dt;
     const t = now;
+    const airborne = this.worldY > 0.12;
     const breath = Math.sin((Math.PI * 2 * t) / 2.8);
-    this.head.position.y = 1.70 + 0.012 * Math.sin((Math.PI * 2 * t) / 2.8 + 0.6);
+
+    this.head.position.y = 1.7 + 0.015 * Math.sin((Math.PI * 2 * t) / 2.8 + 0.6);
     this.bodyMesh.scale.set(1 + 0.006 * breath, 1 + 0.012 * breath, 1 + 0.006 * breath);
 
     // 眨眼
@@ -232,63 +266,81 @@ export class ChickModel {
     for (const eye of this.eyes) eye.scale.y = 1 - 0.92 * blink;
     for (const glint of this.eyeGlints) glint.scale.y = 1 - 0.92 * blink;
 
-    // 呼吸缩放 + 受击 punch
+    // 受击弹性缩放 + 抖动
     const age = t - this.hitAt;
-    const punch = age >= 0 && age < 0.5 ? 1 + 0.08 * Math.exp(-14 * age) : 1;
+    const punch = age >= 0 && age < 0.45 ? 1 + 0.1 * Math.exp(-13 * age) : 1;
     this.rig.scale.set(
       (1 - 0.008 * breath) * punch,
       (1 + 0.016 * breath) * punch,
       (1 - 0.008 * breath) * punch,
     );
 
-    // 受击抖动
     let shake = 0;
-    if (age >= 0 && age < 0.5) shake = 0.06 * Math.exp(-9 * age) * Math.sin(52 * age);
-    const bob = this.moving ? 0.022 * Math.sin((4 * Math.PI * t) / 0.7 + 0.4) : 0;
+    if (age >= 0 && age < 0.45) shake = 0.075 * Math.exp(-9 * age) * Math.sin(54 * age);
+
+    const bob = this.moving && !airborne ? 0.03 * Math.sin((4 * Math.PI * t) / 0.55 + 0.4) : 0;
     this.down += (this.downTarget - this.down) * Math.min(1, dt * 8);
-    this.root.position.set(this.worldX + this.lunge + shake, 0, this.worldZ + shake * 0.5);
-    this.root.rotation.z = -1.2 * this.down;
+
+    // 平滑转向
+    const targetYaw = this.facing === 1 ? 0 : Math.PI;
+    let diff = targetYaw - this.currentYaw;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    this.currentYaw += diff * Math.min(1, dt * 16);
+
+    this.root.position.set(
+      this.worldX + this.lunge + shake,
+      this.worldY,
+      this.worldZ + shake * 0.4,
+    );
+    this.root.rotation.y = this.currentYaw;
+    // 空中微微仰起增强 3D 跳跃立体感
+    const airTilt = airborne ? 0.14 : 0;
+    this.root.rotation.z = -1.2 * this.down + airTilt;
     this.rig.position.y = bob;
 
-    this.batches.update(t, battle, this.moving);
+    this.batches.update(t, battle, this.moving, airborne);
+
     for (const f of this.flashes.values()) {
       const a = t - f.at;
       if (a >= 0 && a < 0.5) {
         f.sprite.visible = true;
         const k = 1 - a / 0.5;
-        (f.sprite.material as THREE.SpriteMaterial).opacity = 0.9 * k;
-        f.sprite.scale.setScalar(0.65 + (1 - k) * 0.5);
+        (f.sprite.material as THREE.SpriteMaterial).opacity = 0.92 * k;
+        f.sprite.scale.setScalar(0.75 + (1 - k) * 0.6);
       } else if (f.sprite.visible) {
         f.sprite.visible = false;
       }
     }
+
+    // 贴地阴影随 3D 跳跃高度缩小变淡，立体感一目了然（P-008）
     this.shadow.position.set(this.worldX + this.lunge, 0.012, this.worldZ);
     const shadowMat = this.shadow.material as THREE.MeshBasicMaterial;
-    shadowMat.opacity = 0.38 * Math.max(0.25, 1 - Math.max(0, bob) / 1.2);
-    const s = 1 + Math.abs(this.lunge) * 0.08;
+    const hFactor = Math.max(0.28, 1 - this.worldY / 3.2);
+    shadowMat.opacity = 0.42 * hFactor;
+    const s = hFactor * (1 + Math.abs(this.lunge) * 0.08);
     this.shadow.scale.set(s, 1, s);
   }
 
-  /** 槽位环锚点（世界坐标），UI 用 camera 投影。 */
   getSlotWorld(slot: SlotId, out: THREE.Vector3): THREE.Vector3 {
     const a = SLOT_ANCHORS[slot];
     return out.set(
-      this.worldX + this.lunge + a[0],
-      this.rig.position.y + a[1],
+      this.worldX + this.lunge + a[0] * this.facing,
+      this.worldY + this.rig.position.y + a[1],
       this.worldZ + a[2],
     );
   }
 
   getHeadWorld(out: THREE.Vector3): THREE.Vector3 {
-    return out.set(this.worldX + this.lunge + 0.8, this.rig.position.y + 1.72, this.worldZ);
+    return out.set(
+      this.worldX + this.lunge + 0.8 * this.facing,
+      this.worldY + this.rig.position.y + 1.85,
+      this.worldZ,
+    );
   }
 
   get slotCounts(): Readonly<Record<SlotId, number>> {
     return this.counts;
-  }
-
-  get totalParts(): number {
-    return Object.values(this.counts).reduce((a, b) => a + b, 0);
   }
 
   dispose(): void {
@@ -303,23 +355,4 @@ export class ChickModel {
   }
 }
 
-/** 临时向量，避免 UI 每帧 new Vector3。 */
-export function projectWorld(world: THREE.Vector3, camera: THREE.Camera, out: THREE.Vector3): THREE.Vector3 {
-  return out.copy(world).project(camera);
-}
-
-export function slotWorldOf(model: ChickModel, slot: SlotId): THREE.Vector3 {
-  const out = new THREE.Vector3();
-  model.getSlotWorld(slot, out);
-  return out;
-}
-
-export function headWorldOf(model: ChickModel): THREE.Vector3 {
-  const out = new THREE.Vector3();
-  model.getHeadWorld(out);
-  return out;
-}
-
-/** 内部临时量（避免每次调用分配）。 */
 export { tmpWorld };
-void DEG;

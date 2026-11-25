@@ -1,226 +1,242 @@
 /**
- * 零件实例批处理（B 负责）。
+ * 零件 3D 渲染与视觉进阶系统（P-022, P-025, P-026）
  * ---------------------------------------------------------------
- * 所有零件用 BatchedMesh 合并成 3 个 draw call：
- *   - 正面/双面 toon 各一个（per-instance color 区分材质色）
- *   - 反向法线描边一个
- * 布局完全来自 core 的 PlacedPart（已是地面世界坐标）；这里只做动画/飞入。
+ * - 躯干 `body`：1~3 种融合件共用单一轮廓，实时绘制 1 / 1/2 / 1/3 拼色纹样贴图；
+ * - 其余部位：鲜明独立主色 + 清晰描边壳；
+ * - 2 阶 / 3 阶：体量微涨 + 亮度/强调色进阶 + 专属 3D 环绕/升腾粒子光效；
+ * - 专属动画：螺旋桨尾旋转、雷达锅扫描、腿部迈步、翅膀扇动、铁门举盾。
  */
 
 import * as THREE from 'three';
-import type { PartDef, PlacedPart, SlotId } from '../core';
+import type { PartDef, PartInstance, PlacedPart } from '../core';
 import { partGeometry } from './geometry';
-import { PALETTE, outlineMaterial, toonMaterial } from './materials';
+import {
+  createBodyFusionTexture,
+  getGlowSpriteTexture,
+  getGradientMap,
+  levelTintHex,
+  outlineMaterial,
+  toonMaterial,
+} from './materials';
 
 const DEG = Math.PI / 180;
-const MAX_INSTANCES = 64;
-const MAX_VERTS = 120000;
-const MAX_INDICES = 240000;
 
-/** layoutParts() 已是地面世界坐标；这里不需要再补槽位偏移。 */
-export const SLOT_ADAPTER: Record<SlotId, readonly [number, number, number]> = {
-  body: [0, 0, 0],
-  beak: [0, 0, 0],
-  legs: [0, 0, 0],
-  wings: [0, 0, 0],
-  tail: [0, 0, 0],
-  crest: [0, 0, 0],
-};
+interface PartVisual {
+  readonly placement: PlacedPart;
+  readonly def: PartDef;
+  readonly index: number;
+  readonly holder: THREE.Group;
+  readonly mesh: THREE.Mesh;
+  readonly hull: THREE.Mesh;
+  readonly ownedMaterial?: THREE.Material;
+  readonly ownedTexture?: THREE.Texture;
+  readonly particles: THREE.Sprite[];
+}
 
 function indexOfInstance(instanceKey: string): number {
   const m = /#(\d+)$/.exec(instanceKey);
   return m ? Number(m[1]) : 0;
 }
 
-function sideOf(placement: PlacedPart): 'R' | 'L' {
-  return placement.position[2] < -1e-4 ? 'L' : 'R';
-}
-
-interface PartRecord {
-  readonly placement: PlacedPart;
-  readonly def: PartDef;
-  readonly side: 'R' | 'L';
-  readonly index: number;
-  readonly front: boolean;
-  readonly frontId: number;
-  readonly outlineId: number;
-}
-
 export class PartBatches {
   readonly group = new THREE.Group();
-  private partMesh: THREE.BatchedMesh | null = null;
-  private outlineMesh: THREE.BatchedMesh | null = null;
-  private records: PartRecord[] = [];
+  private visuals: PartVisual[] = [];
   private readonly spawnAt = new Map<string, number>();
-  private readonly matrix = new THREE.Matrix4();
-  private readonly q = new THREE.Quaternion();
-  private readonly qLocal = new THREE.Quaternion();
-  private readonly e = new THREE.Euler();
-  private readonly pos = new THREE.Vector3();
-  private readonly scl = new THREE.Vector3();
-  private readonly color = new THREE.Color();
 
   constructor() {
-    this.group.name = 'part-batches';
+    this.group.name = 'part-visuals';
   }
 
-  sync(placements: readonly PlacedPart[], byId: Readonly<globalThis.Record<string, PartDef>>, now: number): void {
-    this.disposeMeshes();
-    const partMat = toonMaterial({ color: 0xffffff, side: THREE.DoubleSide });
-    this.partMesh = new THREE.BatchedMesh(MAX_INSTANCES, MAX_VERTS, MAX_INDICES, partMat);
-    this.outlineMesh = new THREE.BatchedMesh(MAX_INSTANCES, MAX_VERTS, MAX_INDICES, outlineMaterial());
-    for (const mesh of [this.partMesh, this.outlineMesh]) {
-      mesh.frustumCulled = false;
-      mesh.perObjectFrustumCulled = false;
-      mesh.sortObjects = false;
-    }
-    this.partMesh.name = 'parts-all';
-    this.outlineMesh.name = 'parts-outline';
-    this.outlineMesh.renderOrder = 1;
-    this.group.add(this.partMesh, this.outlineMesh);
-
-    const frontGeo = new Map<string, number>();
-    const outlineGeo = new Map<string, number>();
+  sync(
+    placements: readonly PlacedPart[],
+    byId: Readonly<Record<string, PartDef>>,
+    now: number,
+    bodyInstances: readonly PartInstance[] = [],
+  ): void {
+    this.clearVisuals();
     const alive = new Set<string>();
-    const records: PartRecord[] = [];
 
     for (const placement of placements) {
       const def = byId[placement.defId];
       if (!def) continue;
       alive.add(placement.instanceKey);
-      if (!this.spawnAt.has(placement.instanceKey)) this.spawnAt.set(placement.instanceKey, now);
-      const side = sideOf(placement);
-      const key = `${def.art.geometry}|${side}`;
-      const entry = partGeometry(def.art.geometry, side);
-      const batch = this.partMesh;
-      const geoMap = frontGeo;
-      let geoId = geoMap.get(key);
-      if (geoId === undefined) {
-        entry.geo.computeBoundingBox();
-        entry.geo.computeBoundingSphere();
-        geoId = batch.addGeometry(entry.geo);
-        geoMap.set(key, geoId);
+      if (!this.spawnAt.has(placement.instanceKey)) {
+        this.spawnAt.set(placement.instanceKey, now);
       }
-      const frontId = batch.addInstance(geoId);
-      this.color.setHex(PALETTE[def.art.material]);
-      batch.setColorAt(frontId, this.color);
 
-      let outGeoId = outlineGeo.get(key);
-      if (outGeoId === undefined) {
-        entry.outline.computeBoundingBox();
-        entry.outline.computeBoundingSphere();
-        outGeoId = this.outlineMesh.addGeometry(entry.outline);
-        outlineGeo.set(key, outGeoId);
+      const entry = partGeometry(def.art.geometry, placement.side);
+      const holder = new THREE.Group();
+      let mat: THREE.Material;
+      let ownedMaterial: THREE.Material | undefined;
+      let ownedTexture: THREE.Texture | undefined;
+
+      if (placement.slot === 'body') {
+        const defs = bodyInstances
+          .map((inst) => byId[inst.defId])
+          .filter((d): d is PartDef => Boolean(d));
+        const levels = bodyInstances.map((inst) => inst.level);
+        const tex = createBodyFusionTexture(defs.length > 0 ? defs : [def], levels.length > 0 ? levels : [placement.level]);
+        const bodyMat = new THREE.MeshToonMaterial({
+          color: 0xffffff,
+          map: tex,
+          gradientMap: getGradientMap(),
+          side: THREE.FrontSide,
+        });
+        mat = bodyMat;
+        ownedMaterial = bodyMat;
+        ownedTexture = tex;
+      } else {
+        const tinted = levelTintHex(def.art.color, def.art.accentColor, placement.level);
+        const doubleSide = placement.slot === 'wings' || placement.slot === 'tail';
+        mat = toonMaterial({
+          color: tinted,
+          side: doubleSide ? THREE.DoubleSide : THREE.FrontSide,
+        });
       }
-      const outlineId = this.outlineMesh.addInstance(outGeoId);
-      records.push({
+
+      const mesh = new THREE.Mesh(entry.geo, mat);
+      const hull = new THREE.Mesh(entry.outline, outlineMaterial());
+      hull.renderOrder = 1;
+      holder.add(mesh, hull);
+
+      // 2 阶 / 3 阶视觉粒子特效（P-022, P-025, P-026）
+      const particles: THREE.Sprite[] = [];
+      const particleCount = placement.level >= 3 ? 6 : placement.level === 2 ? 3 : 0;
+      if (particleCount > 0) {
+        const pColor = placement.level >= 3 ? 0xffe875 : def.art.accentColor;
+        for (let p = 0; p < particleCount; p += 1) {
+          const smat = new THREE.SpriteMaterial({
+            map: getGlowSpriteTexture(),
+            color: p % 2 === 0 ? pColor : def.art.accentColor,
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            opacity: placement.level >= 3 ? 0.9 : 0.65,
+          });
+          const sprite = new THREE.Sprite(smat);
+          const sz = placement.level >= 3 ? 0.24 : 0.16;
+          sprite.scale.set(sz, sz, sz);
+          holder.add(sprite);
+          particles.push(sprite);
+        }
+      }
+
+      this.group.add(holder);
+      this.visuals.push({
         placement,
         def,
-        side,
         index: indexOfInstance(placement.instanceKey),
-        front: false,
-        frontId,
-        outlineId,
+        holder,
+        mesh,
+        hull,
+        ownedMaterial,
+        ownedTexture,
+        particles,
       });
     }
-    for (const key of [...this.spawnAt.keys()]) if (!alive.has(key)) this.spawnAt.delete(key);
-    this.records = records;
-    this.update(now, false, false);
+
+    for (const key of [...this.spawnAt.keys()]) {
+      if (!alive.has(key)) this.spawnAt.delete(key);
+    }
+    this.update(now, false, false, false);
   }
 
-  update(t: number, battle: boolean, moving: boolean): void {
-    if (this.outlineMesh) this.outlineMesh.visible = this.records.length <= 8;
-    for (const rec of this.records) {
-      const { placement, def, side, index } = rec;
+  update(t: number, battle: boolean, moving: boolean, airborne = false): void {
+    for (const vis of this.visuals) {
+      const { placement, def, index, holder, particles } = vis;
       const born = this.spawnAt.get(placement.instanceKey) ?? -10;
       const age = Math.max(0, t - born);
       const spawnU = Math.min(1, age / 0.18);
       const spawnEase = 1 - Math.pow(1 - spawnU, 3);
 
       const [rx, ry, rz] = placement.rotation;
-      this.e.set(rx * DEG, ry * DEG, rz * DEG);
-      this.q.setFromEuler(this.e);
+      holder.rotation.set(rx * DEG, ry * DEG, rz * DEG);
 
       let lx = 0;
       let ly = 0;
       let lz = 0;
+
       if (def.slot === 'legs') {
-        const phase = (0.5 * index + 0.08 * Math.floor(index / 2)) % 1;
-        const amp = battle || moving ? (battle ? 24 : 20) : 5;
-        lz = amp * DEG * Math.sin(Math.PI * 2 * (t / 0.7 - phase));
+        const phase = 0.5 * index;
+        const amp = airborne ? 8 : moving ? (battle ? 26 : 22) : 4;
+        lz = amp * DEG * Math.sin(Math.PI * 2 * (t / 0.55 - phase));
       } else if (def.slot === 'wings') {
-        const q = Math.floor(index / 2);
-        const tw = battle ? 0.3 : 0.55;
-        const amp = battle ? 26 : moving ? 16 : 8;
-        const flap = -(8 + amp * Math.sin((Math.PI * 2 * (t - 0.05 * q)) / tw)) * DEG;
-        lx = side === 'L' ? -flap : flap;
+        const isArm = def.tags.includes('arm') || def.tags.includes('shield');
+        if (isArm) {
+          lz = (moving || battle ? 14 : 5) * DEG * Math.sin(t * 5.5 + index * Math.PI);
+        } else {
+          const tw = airborne ? 0.18 : battle ? 0.28 : 0.52;
+          const amp = airborne ? 34 : battle ? 24 : moving ? 16 : 9;
+          const flap = -(8 + amp * Math.sin((Math.PI * 2 * t) / tw)) * DEG;
+          lx = placement.side === 'L' ? -flap : flap;
+        }
       } else if (def.slot === 'tail') {
-        ly = 4 * DEG * Math.sin((Math.PI * 2 * t) / 3.1 + index * 0.3);
+        if (def.id === 'tail.propeller') {
+          lx = (t * (battle || moving ? 22 : 10)) % (Math.PI * 2);
+        } else {
+          ly = 7 * DEG * Math.sin((Math.PI * 2 * t) / 2.2 + index * 0.3);
+        }
       } else if (def.slot === 'crest') {
-        lz = 1.5 * DEG * Math.sin((Math.PI * 2 * t) / 2.2 + index * 0.5);
+        if (def.id === 'crest.radar') {
+          ly = (t * 3.2) % (Math.PI * 2);
+        } else if (def.id === 'crest.rabbit') {
+          lz = 6 * DEG * Math.sin((Math.PI * 2 * t) / 1.4);
+        } else {
+          lz = 2 * DEG * Math.sin((Math.PI * 2 * t) / 2.2);
+        }
       } else if (def.slot === 'beak') {
-        lz = 1.2 * DEG * Math.sin((Math.PI * 2 * t) / 5);
-      }
-      if (spawnU < 1) lz += -0.9 * (1 - spawnEase);
-      if (lx !== 0 || ly !== 0 || lz !== 0) {
-        this.e.set(lx, ly, lz);
-        this.qLocal.setFromEuler(this.e);
-        this.q.multiply(this.qLocal);
+        lz = (battle ? 4 : 1.5) * DEG * Math.sin((Math.PI * 2 * t) / 2.8);
       }
 
-      let sx = 0;
-      let sy = 0;
-      let sz = 0;
       if (spawnU < 1) {
-        const away = 1 - spawnEase;
-        if (def.slot === 'legs') {
-          sy = 0.4 * away;
-          sz = (side === 'L' ? -1 : 1) * 0.12 * away;
-        } else if (def.slot === 'wings') {
-          sy = 0.3 * away;
-          sz = (side === 'L' ? -1 : 1) * 0.45 * away;
-        } else if (def.slot === 'beak') {
-          sx = 0.5 * away;
-          sy = 0.18 * away;
-        } else if (def.slot === 'tail') {
-          sx = -0.45 * away;
-          sy = 0.18 * away;
-        } else if (def.slot === 'crest') {
-          sy = 0.4 * away;
-        } else {
-          sy = 0.35 * away;
+        lz += -0.65 * (1 - spawnEase);
+      }
+
+      holder.rotation.x += lx;
+      holder.rotation.y += ly;
+      holder.rotation.z += lz;
+
+      const pop = spawnU < 1 ? 0.55 + 0.45 * spawnEase : 1;
+      const pulse = placement.level >= 3 ? 1 + 0.03 * Math.sin(t * 6) : 1;
+      holder.scale.setScalar(placement.scale * pop * pulse);
+
+      const away = 1 - spawnEase;
+      const sy = spawnU < 1 ? 0.35 * away : 0;
+      holder.position.set(
+        placement.position[0],
+        placement.position[1] + sy,
+        placement.position[2],
+      );
+
+      // 更新 2 阶 / 3 阶环绕与升腾粒子
+      if (particles.length > 0) {
+        const radius = placement.slot === 'body' ? 0.85 : 0.36;
+        for (let i = 0; i < particles.length; i += 1) {
+          const sp = particles[i];
+          const ang = t * (placement.level >= 3 ? 3.2 : 2.1) + (i / particles.length) * Math.PI * 2;
+          const rise = placement.level >= 3 ? ((t * 0.7 + i * 0.25) % 1) * 0.55 - 0.15 : Math.sin(ang * 2) * 0.12;
+          sp.position.set(Math.cos(ang) * radius, rise, Math.sin(ang) * radius);
+          const smat = sp.material as THREE.SpriteMaterial;
+          smat.opacity = placement.level >= 3 ? 0.45 + 0.5 * Math.abs(Math.sin(t * 5 + i)) : 0.4 + 0.3 * Math.sin(t * 3 + i);
         }
       }
-
-      this.pos.set(
-        placement.position[0] + SLOT_ADAPTER[def.slot][0] + sx,
-        placement.position[1] + SLOT_ADAPTER[def.slot][1] + sy,
-        placement.position[2] + SLOT_ADAPTER[def.slot][2] + sz,
-      );
-      this.scl.setScalar(placement.scale);
-      this.matrix.compose(this.pos, this.q, this.scl);
-      this.partMesh?.setMatrixAt(rec.frontId, this.matrix);
-      this.outlineMesh?.setMatrixAt(rec.outlineId, this.matrix);
     }
   }
 
-  private disposeMeshes(): void {
-    for (const mesh of [this.partMesh, this.outlineMesh]) {
-      if (!mesh) continue;
-      this.group.remove(mesh);
-      mesh.dispose();
+  private clearVisuals(): void {
+    for (const vis of this.visuals) {
+      this.group.remove(vis.holder);
+      vis.ownedMaterial?.dispose();
+      vis.ownedTexture?.dispose();
+      for (const sp of vis.particles) {
+        (sp.material as THREE.Material).dispose();
+      }
     }
-    this.partMesh = null;
-    this.outlineMesh = null;
-  }
-
-  get batchCount(): number {
-    return 2;
+    this.visuals = [];
   }
 
   dispose(): void {
-    this.disposeMeshes();
-    this.records = [];
+    this.clearVisuals();
     this.spawnAt.clear();
   }
 }

@@ -1,8 +1,11 @@
 /**
- * 拼装小鸡 · 共享类型（A 负责，B 只读）
+ * 拼装小鸡 · 共享类型（逻辑内核纯 TS，无 DOM / three 依赖）
  * ---------------------------------------------------------------
- * 严格对齐 docs/INTERFACES.md。所有对外结构带 v；逻辑内核不依赖 DOM / three。
- * 单位约定：长度 1 = 1 分米；角度 = 度；战斗内部 HP/伤害用 1/1000 定点（milli-HP）。
+ * 支持：
+ *   - 6 部位跨动物 + 机械混搭（P-013, P-014, P-017）
+ *   - 同件叠强 1~3 阶、躯干最多 3 种异件融合拼色（P-022, P-025, P-026, P-027）
+ *   - 部位内精简版造型微调（P-028，仅影响造型，不影响战斗）
+ *   - 8 组精确归属特殊组合与冲突（P-030）
  */
 
 /* ==========================================================================
@@ -18,10 +21,19 @@ export type Stage = 1 | 2 | 3;
 
 export type Side = 'left' | 'right';
 
-/** 主动技 id；M0 只做事件表现，数值效果保持极简。 */
 export type AbilityId = string;
 
-/** 属性增量（部件）或最终值（CreatureStats 复用同名字段）。 */
+export type PartTheme = 'animal' | 'mech';
+
+export type PatternKind =
+  | 'turtle'
+  | 'hedgehog'
+  | 'puffer'
+  | 'swift'
+  | 'caterpillar'
+  | 'iron'
+  | 'solid';
+
 export interface Stats {
   hp: number;
   atk: number;
@@ -38,133 +50,145 @@ export interface LocalizedText {
  * 2. 配置表：零件
  * ========================================================================== */
 
-/**
- * 程序化几何生成 key。约定为 `${slot}.${variant}`，
- * 例如 `legs.spring`。B 必须按这个 key 建几何，不要在渲染层按 id 分支。
- */
 export type GeometryKey = string;
 
 export interface PartArt {
-  /** 程序化几何 key（= `${slot}.${variant}`）。 */
   geometry: GeometryKey;
   material: 'skin' | 'metal' | 'feather' | 'bone';
-  /** 挂到骨架的哪个节点。 */
   anchor: SlotId;
-  /** 相对锚点的位移（1 单位 = 1 分米）。 */
   offset: [number, number, number];
-  /** 欧拉角，度。 */
   rotation: [number, number, number];
   scale: number;
-  /** 腿/翼成对时的左右镜像提示。 */
   mirrored?: boolean;
+  /** 主色调（hex，如 0x2f8c52），用于 3D 着色、分区拼色与 UI 色块。 */
+  color: number;
+  /** 辅色（用于图案点缀与 2/3 阶粒子色）。 */
+  accentColor: number;
+  /** 躯干表面纹样 key（P-025）。 */
+  pattern?: PatternKind;
+  /** 是否成对渲染（腿、侧肢默认成对，P-012）。 */
+  paired?: boolean;
 }
 
 export interface PartDef {
-  /** 'legs.spring'，命名空间 = 槽位。 */
   id: string;
   name: LocalizedText;
   desc: LocalizedText;
+  /** 一句话核心玩法作用（P-007）。 */
+  role: string;
+  /** 来源动物或机械原型（用于第 1 关图鉴与战利品卡片）。 */
+  source: string;
+  theme: PartTheme;
   slot: SlotId;
   tier: 1 | 2 | 3;
-  /** 占槽容量；M0 不校验，仅记录。 */
   size: 1 | 2 | 3;
-  /** 整数重量，影响速度/起飞。 */
   mass: number;
-  /** 增量属性，不是绝对值；缺省按 0。 */
   stats: Partial<Stats>;
-  /** 'light' | 'jump' | 'armor' | 'fly' ... */
   tags: readonly string[];
-  /** 战斗主动技（可选）。 */
+  /** 战斗机制特性标记（如 jump / glide / anti_air / thorns / poison 等）。 */
+  traits: readonly string[];
+  /** 攻击是否可直接命中空中目标（P-009）。 */
+  canHitAir?: boolean;
   ability?: AbilityId;
   art: PartArt;
-  /** M0 不校验，保留给 M2。 */
   unlock: { level?: number; cost?: number };
 }
 
 /* ==========================================================================
- * 3. 运行时：生物
+ * 3. 运行时：生物与造型微调
  * ========================================================================== */
 
 export interface PartInstance {
-  /** 指向 PartDef.id。 */
   defId: string;
-  /** 强化等级，影响 stats 倍率。 */
+  /** 叠强阶数：1 阶基础 / 2 阶变色发光 / 3 阶满级粒子升阶（P-022, P-026）。 */
   level: 1 | 2 | 3;
 }
 
-/** 槽位 → 零件列表；可重复挂载，M0 允许 10 条腿。 */
+/** 精简版部位内造型微调（P-028，仅影响 3D 外观，不参与战斗数值）。 */
+export interface SlotTweak {
+  offset: [number, number, number];
+  rotation: [number, number, number];
+  scale: number;
+}
+
 export type SlotMap = Record<SlotId, PartInstance[]>;
 
 export interface Creature {
   v: 1;
-  /** 本地 uuid / 玩家标识。 */
   id: string;
   stage: Stage;
   slots: SlotMap;
+  tweaks?: Partial<Record<SlotId, SlotTweak>>;
   skin?: string;
 }
 
 export interface CreatureStats {
   v: 1;
-  /** 最终 HP（不是增量）。 */
   hp: number;
-  /** 最终 ATK（不是增量）。 */
   atk: number;
-  /** 最终 DEF（不是增量）。 */
   def: number;
-  /** 最终 SPD，约 5..300。 */
   spd: number;
   mass: number;
   capacity: number;
-  /** 生效标签（零件 + 协同），去重且有序。 */
   tags: string[];
+  traits: string[];
+  combos: string[];
   abilities: AbilityId[];
   flags: {
     grounded: boolean;
     canGlide: boolean;
     overloaded: boolean;
+    canJump: boolean;
+    canHitAir: boolean;
   };
 }
 
-/** 挂点求解结果；渲染层只消费它，不做布局。 */
 export interface PlacedPart {
   defId: string;
-  /** 1 单位 = 1 分米，身体沿 +x。 */
+  slot: SlotId;
+  level: 1 | 2 | 3;
   position: [number, number, number];
-  /** 欧拉角，度。 */
   rotation: [number, number, number];
   scale: number;
-  /** 同 defId 的实例可共享几何；这里带序号保证唯一。 */
+  side: 'R' | 'L';
   instanceKey: string;
 }
 
 /* ==========================================================================
- * 4. 协同规则
+ * 4. 协同 / 特殊组合规则（P-007, P-030）
  * ========================================================================== */
 
 export interface SynergyCondition {
-  /** 必须同时具备的标签。 */
+  /** 全身必须同时具备的标签（兼容旧规则）。 */
   tags?: readonly string[];
-  /** 槽位 → 部件 id 前缀（至少一个匹配）。 */
+  /** 指定槽位必须匹配的前缀。 */
   slots?: Partial<Record<SlotId, string>>;
+  /** 精确按部位限定：每个指定部位至少包含列表中的任意一个 defId。 */
+  slotAnyIds?: Partial<Record<SlotId, readonly string[]>>;
+  /** 躯干同时融合包含的多个 defId（P-025 躯干拼色彩蛋）。 */
+  bodyFusionAll?: readonly string[];
+  /** 全身任意部位包含列表中至少一个 defId（用于物理冲突检查等）。 */
+  anyIds?: readonly string[];
+  /** 全身任意部位包含第二组列表中至少一个 defId。 */
+  anyIds2?: readonly string[];
   maxMass?: number;
   minMass?: number;
-  /** 某槽位至少 / 至多几个实例（用于“多腿”）。 */
   minCount?: Partial<Record<SlotId, number>>;
   maxCount?: Partial<Record<SlotId, number>>;
 }
 
 export type SynergyEffect =
   | { readonly type: 'grantTag'; readonly tag: string }
+  | { readonly type: 'grantTrait'; readonly trait: string }
   | { readonly type: 'statMul'; readonly stat: keyof Stats; readonly mul: number }
   | { readonly type: 'statAdd'; readonly stat: keyof Stats; readonly add: number }
   | { readonly type: 'unlockAbility'; readonly ability: AbilityId };
 
 export interface SynergyRule {
   id: string;
+  name?: LocalizedText;
   when: SynergyCondition;
   effect: SynergyEffect;
-  /** 可选附加效果，用于“提速但笨重”这类一条规则两个结果。 */
   extraEffects?: readonly SynergyEffect[];
   ui: { text: LocalizedText; tone: 'buff' | 'debuff' };
 }
@@ -180,10 +204,15 @@ export interface SynergyNote {
  * ========================================================================== */
 
 export type EditIntent =
+  | { type: 'equipOrUpgrade'; slot: SlotId; defId: string }
+  | { type: 'downgradePart'; slot: SlotId; defId: string }
   | { type: 'addPart'; slot: SlotId; defId: string }
   | { type: 'removePart'; slot: SlotId; index: number }
   | { type: 'clearSlot'; slot: SlotId }
   | { type: 'upgrade'; slot: SlotId; index: number }
+  | { type: 'setTweak'; slot: SlotId; tweak: SlotTweak }
+  | { type: 'resetTweak'; slot: SlotId }
+  | { type: 'resetAllTweaks' }
   | { type: 'changeSkin'; skin: string };
 
 export type EditErrorCode =
@@ -191,6 +220,8 @@ export type EditErrorCode =
   | 'size_exceeded'
   | 'not_owned'
   | 'incompatible'
+  | 'max_level'
+  | 'fusion_full'
   | 'too_many';
 
 export type EditResult =
@@ -199,27 +230,24 @@ export type EditResult =
       creature: Creature;
       stats: CreatureStats;
       notes: SynergyNote[];
+      action?: 'equipped' | 'upgraded' | 'replaced' | 'fused' | 'downgraded' | 'removed' | 'updated';
     }
   | { ok: false; code: EditErrorCode; detail?: string };
 
 /* ==========================================================================
- * 6. 战斗
+ * 6. 确定性一维战斗（保留单测兼容）
  * ========================================================================== */
 
 export interface BattleSide {
   creatureId: string;
   stats: CreatureStats;
-  /** 逻辑坐标（整数/定点由调用方决定，内核按传入值使用）。 */
   spawnX: number;
 }
 
 export interface BattleConfig {
   v: 1;
-  /** uint32 种子。 */
   seed: number;
-  /** 默认 30。 */
   tickRate: 30;
-  /** 上限 tick，默认 1800（60 秒）。 */
   maxTicks: number;
   arena: { width: number };
   left: BattleSide;
@@ -240,7 +268,6 @@ export type BattleEvent =
       type: 'attack';
       side: Side;
       target: Side;
-      /** 1/1000 定点伤害（milli-HP）。 */
       damage: number;
       crit: boolean;
     }
@@ -251,11 +278,8 @@ export type BattleEvent =
 export interface BattleResult {
   v: 1;
   winner: Side | 'draw';
-  /** 实际模拟的 tick 数（≤ maxTicks）。 */
   ticks: number;
-  /** 剩余 HP，1/1000 定点（milli-HP）。 */
   remainingHp: { left: number; right: number };
   events: BattleEvent[];
-  /** 状态哈希，用于回放校验。 */
   hash: string;
 }

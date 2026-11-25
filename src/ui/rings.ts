@@ -1,29 +1,20 @@
-/** 小鸡周围的 6 个槽位环（DOM 投影；永远面向相机）。 */
+/** 小鸡周围的 6 个可点击/可拖放槽位环（点击直接打开部位造型微调，P-028）。 */
 
 import * as THREE from 'three';
-import type { SlotId } from '../core';
-import { SLOT_IDS } from '../core';
+import type { Creature, SlotId } from '../core';
+import { MAX_BODY_FUSION, SLOT_IDS } from '../core';
 import type { ChickModel } from '../render3d/chick';
 import type { SceneView } from '../render3d/scene';
 import { el } from './dom';
 import { t } from './strings';
 
 const OFFSET: Record<SlotId, readonly [number, number]> = {
-  body: [-96, 32],
-  beak: [122, 18],
-  legs: [16, 104],
+  body: [-98, 28],
+  beak: [122, 16],
+  legs: [16, 108],
   wings: [-94, -78],
-  tail: [-196, 10],
-  crest: [46, -108],
-};
-
-const LABEL: Record<SlotId, string> = {
-  body: '躯干',
-  beak: '喙',
-  legs: '腿',
-  wings: '翼',
-  tail: '尾',
-  crest: '冠',
+  tail: [-194, 10],
+  crest: [48, -112],
 };
 
 const LABEL_KEY: Record<SlotId, 'slot.body' | 'slot.beak' | 'slot.legs' | 'slot.wings' | 'slot.tail' | 'slot.crest'> = {
@@ -43,17 +34,19 @@ export class SlotRings {
   private readonly tmp = { x: 0, y: 0, visible: false };
   private readonly world = new THREE.Vector3();
 
-  constructor(host: HTMLElement) {
+  constructor(host: HTMLElement, onClickSlot?: (slot: SlotId) => void) {
     this.el = el('div', 'rings-layer');
     for (const slot of SLOT_IDS) {
       const ring = el('div', `slot-ring ring-${slot}`);
       ring.dataset.slot = slot;
+      ring.title = '点击微调该部位造型，或拖入零件';
       const inner = el('div', 'ring-inner');
       const label = el('span', 'ring-label', t(LABEL_KEY[slot]));
       const count = el('span', 'ring-count', '0');
       const hint = el('span', 'ring-drop-hint', t('ring.hint'));
       inner.append(label, count, hint);
       ring.append(inner);
+      ring.addEventListener('click', () => onClickSlot?.(slot));
       this.rings.set(slot, ring);
       this.counts.set(slot, count);
       this.el.append(ring);
@@ -68,17 +61,15 @@ export class SlotRings {
       if (!ring) continue;
       model.getSlotWorld(slot, this.world);
       scene.project(this.world, this.tmp);
-      const narrow = this.el.clientWidth < 700;
-      const scale = narrow ? 0.66 : 1;
-      const size = narrow ? 48 : 62;
+      const size = 62;
       const [dx, dy] = OFFSET[slot];
       const x = Math.min(
         this.el.clientWidth - size / 2 - 6,
-        Math.max(size / 2 + 6, this.tmp.x + dx * scale),
+        Math.max(size / 2 + 6, this.tmp.x + dx),
       );
       const y = Math.min(
         this.el.clientHeight - size / 2 - 6,
-        Math.max(size / 2 + 6, this.tmp.y + dy * scale),
+        Math.max(size / 2 + 6, this.tmp.y + dy),
       );
       ring.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
       ring.style.opacity = this.tmp.visible ? '1' : '0';
@@ -86,13 +77,25 @@ export class SlotRings {
     }
   }
 
-  setCounts(counts: Readonly<Record<SlotId, number>>): void {
+  setCreature(creature: Creature): void {
     for (const slot of SLOT_IDS) {
-      const count = counts[slot] ?? 0;
+      const list = creature.slots[slot];
       const node = this.counts.get(slot);
-      if (node) node.textContent = String(count);
+      if (node) {
+        if (slot === 'body') {
+          node.textContent = list.length > 0 ? `${list.length}/${MAX_BODY_FUSION}` : '0';
+        } else {
+          node.textContent = list[0] ? `Lv.${list[0].level}` : '0';
+        }
+      }
       const ring = this.rings.get(slot);
-      if (ring) ring.classList.toggle('has-count', count > 0);
+      if (ring) ring.classList.toggle('has-count', list.length > 0);
+    }
+  }
+
+  setSelected(slot: SlotId | null): void {
+    for (const [id, ring] of this.rings) {
+      ring.classList.toggle('selected', id === slot);
     }
   }
 
@@ -132,18 +135,5 @@ export class SlotRings {
       if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return slot;
     }
     return null;
-  }
-
-  refreshLanguage(): void {
-    for (const slot of SLOT_IDS) {
-      const ring = this.rings.get(slot);
-      const label = ring?.querySelector('.ring-label');
-      if (label) label.textContent = t(LABEL_KEY[slot]);
-    }
-  }
-
-  /** 供调试/测试读标签。 */
-  label(slot: SlotId): string {
-    return LABEL[slot];
   }
 }
